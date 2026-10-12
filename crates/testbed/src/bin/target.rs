@@ -9,6 +9,13 @@ use netbooty_cfg::loadopt::LoadOption;
 use uefi::runtime::{self, ResetType, VariableVendor};
 use uefi::{CString16, Guid, Status, cstr16, entry, println};
 
+/// Shim refuses images without SBAT metadata, so the stand-in needs it too
+/// when it is signed and loaded behind shim.
+#[used]
+#[unsafe(link_section = ".sbat")]
+static SBAT: [u8; 116] =
+    *b"sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md\nnbtestbed,1,NetBooty,testbed,0.1.0,none\n";
+
 fn u16_var(name: &uefi::CStr16) -> Option<u16> {
     let mut b = [0u8; 2];
     runtime::get_variable(name, &VariableVendor::GLOBAL_VARIABLE, &mut b)

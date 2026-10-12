@@ -16,6 +16,7 @@ mod oneshot;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use netbooty_cfg::config::{self, Config, Fallback, ResetKind};
@@ -23,6 +24,7 @@ use netbooty_cfg::loadopt::{Resolution, resolve};
 use uefi::boot::{self, LoadImageSource};
 use uefi::proto::BootPolicy;
 use uefi::proto::device_path::DevicePath;
+use uefi::proto::loaded_image::LoadedImage;
 use uefi::runtime::{self, ResetType};
 use uefi::{Status, entry, println};
 
@@ -32,6 +34,29 @@ use device::Presence;
 #[used]
 #[unsafe(link_section = ".nbtycfg")]
 static CONFIG: [u8; config::SIZE] = config::placeholder();
+
+/// SBAT metadata; shim refuses second-stage images without it.
+/// https://github.com/rhboot/shim/blob/main/SBAT.md
+#[used]
+#[unsafe(link_section = ".sbat")]
+static SBAT: [u8; SBAT_TEXT.len()] = sbat_bytes();
+const SBAT_TEXT: &[u8] = concat!(
+    "sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md\n",
+    "netbooty,1,NetBooty,netbooty,",
+    env!("CARGO_PKG_VERSION"),
+    ",https://github.com/netbooty/netbooty\n"
+)
+.as_bytes();
+
+const fn sbat_bytes() -> [u8; SBAT_TEXT.len()] {
+    let mut out = [0u8; SBAT_TEXT.len()];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = SBAT_TEXT[i];
+        i += 1;
+    }
+    out
+}
 
 fn load_config() -> Config {
     // Volatile so the optimizer cannot constant-fold the placeholder.
@@ -49,8 +74,22 @@ struct Resolved {
     full_path: Option<Vec<u8>>,
 }
 
+/// ESP-relative path this image was loaded from, e.g. `\\EFI\\netbooty\\netbooty.efi`.
+fn own_image_path() -> Option<String> {
+    let li = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle()).ok()?;
+    let dp = li.file_path()?;
+    let fake = netbooty_cfg::loadopt::build::load_option(0, "", dp.as_bytes(), &[]);
+    Some(netbooty_cfg::loadopt::LoadOption::parse(&fake)?.loader_path).filter(|p| !p.is_empty())
+}
+
 fn resolve_targets(cfg: &Config, own: Option<u16>) -> Vec<Option<Resolved>> {
-    let entries = bootvars::entries();
+    // Entries that start NetBooty itself (directly or via shim) are never
+    // targets, even when they share a loader and partition with one.
+    let me = own_image_path();
+    let entries: Vec<_> = bootvars::entries()
+        .into_iter()
+        .filter(|(_, o)| !me.as_deref().is_some_and(|p| netbooty_cfg::loadopt::launches(o, p)))
+        .collect();
     cfg.targets
         .iter()
         .map(|t| {

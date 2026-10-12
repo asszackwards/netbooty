@@ -22,6 +22,41 @@ impl Store {
         Self { dir: dir.unwrap_or_else(|| "/sys/firmware/efi/efivars".into()) }
     }
 
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    fn global(&self, name: &str) -> Option<Vec<u8>> {
+        let data = std::fs::read(self.dir.join(format!("{name}-{GLOBAL_GUID}"))).ok()?;
+        Some(data.get(4..)?.to_vec())
+    }
+
+    fn global_u16(&self, name: &str) -> Option<u16> {
+        self.global(name).filter(|d| d.len() == 2).map(|d| u16::from_le_bytes([d[0], d[1]]))
+    }
+
+    pub fn boot_order(&self) -> Vec<u16> {
+        self.global("BootOrder")
+            .map(|d| d.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn boot_current(&self) -> Option<u16> {
+        self.global_u16("BootCurrent")
+    }
+
+    pub fn boot_next(&self) -> Option<u16> {
+        self.global_u16("BootNext")
+    }
+
+    /// Target name of a pending NetBootyNext request.
+    pub fn pending_next(&self) -> Option<String> {
+        let data = std::fs::read(self.next_path()).ok()?;
+        let name = data.get(4..)?;
+        let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        Some(String::from_utf8_lossy(&name[..end]).into_owned())
+    }
+
     fn next_path(&self) -> PathBuf {
         self.dir.join(format!("{VAR_NEXT}-{VENDOR_GUID}"))
     }

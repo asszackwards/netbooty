@@ -16,10 +16,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-EFI_DIR = ROOT / "target" / "x86_64-unknown-uefi" / "release"
-SETUP_BIN = ROOT / "target" / "debug" / "netbooty-setup"
+# Test builds include `test-hooks` (simulated firmware faults), so they go to
+# their own target dir and can never be mistaken for an installable build.
+BUILD_DIR = ROOT / "target" / "e2e"
+EFI_DIR = BUILD_DIR / "x86_64-unknown-uefi" / "release"
+SETUP_BIN = BUILD_DIR / "debug" / "netbooty-setup"
 OVMF_CODE = Path("/usr/share/OVMF/OVMF_CODE_4M.fd")
 OVMF_VARS = Path("/usr/share/OVMF/OVMF_VARS_4M.fd")
+# Secure Boot build (SMM) and a variable store with Microsoft's keys enrolled,
+# so Microsoft-signed shims boot as on real hardware.
+OVMF_CODE_SB = Path("/usr/share/OVMF/OVMF_CODE_4M.secboot.fd")
+OVMF_VARS_MS = Path("/usr/share/OVMF/OVMF_VARS_4M.ms.fd")
 
 DISK_MB = 64
 PART_OFFSET = 1024 * 1024
@@ -30,7 +37,7 @@ def run(*cmd: str | os.PathLike, **kw) -> subprocess.CompletedProcess:
 
 
 def build_all() -> None:
-    env = dict(os.environ, PATH=f"{Path.home()}/.cargo/bin:{os.environ['PATH']}")
+    env = dict(os.environ, PATH=f"{Path.home()}/.cargo/bin:{os.environ['PATH']}", CARGO_TARGET_DIR=str(BUILD_DIR))
     run("cargo", "build", "--release", "--target", "x86_64-unknown-uefi", "-p", "netbooty", "-p", "testbed",
         "--features", "netbooty/test-hooks",
         cwd=ROOT, env=env)
@@ -85,23 +92,30 @@ class Result:
 
 
 class Machine:
-    def __init__(self, workdir: Path, disks: list[Disk]):
+    def __init__(self, workdir: Path, disks: list[Disk], secure_boot: bool = False):
         self.workdir = workdir
         self.disks = disks
+        self.secure_boot = secure_boot
         self.vars = workdir / "vars.fd"
-        shutil.copy(OVMF_VARS, self.vars)
+        shutil.copy(OVMF_VARS_MS if secure_boot else OVMF_VARS, self.vars)
 
     def boot(self, timeout: float = 60, keys: list[tuple[str, str]] | None = None,
-             extra: list[str] | None = None, attach: list[Disk] | None = None) -> Result:
+             extra: list[str] | None = None, attach: list[Disk] | None = None,
+             enforce: bool | None = None) -> Result:
         """Boot until the VM powers off. `keys` is a list of (wait_for, send):
         once `wait_for` appears on the console, `send` is typed over serial."""
+        # The non-SB firmware build never verifies images, even with keys
+        # enrolled; testsetup (unsigned) runs that way against the same store.
+        sb = self.secure_boot if enforce is None else enforce
         args = [
-            "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-m", "512",
+            "qemu-system-x86_64", "-enable-kvm", "-machine", "q35,smm=on" if sb else "q35", "-m", "512",
             "-display", "none", "-monitor", "none", "-serial", "stdio",
-            "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
+            "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE_SB if sb else OVMF_CODE}",
             "-drive", f"if=pflash,format=raw,file={self.vars}",
             "-nic", "none",
         ]
+        if sb:
+            args += ["-global", "driver=cfi.pflash01,property=secure,value=on"]
         # No -no-reboot: NetBooty's reset must restart the firmware in the same
         # VM; the run ends when the stand-in target powers off.
         for d in attach if attach is not None else self.disks:
@@ -122,13 +136,15 @@ class Machine:
         pending = list(keys or [])
         deadline = time.monotonic() + timeout
         exited = False
+        seen = 0  # each trigger only matches output after the previous keystroke
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 exited = True
                 break
             text = b"".join(chunks).decode(errors="replace")
-            if pending and pending[0][0] in text:
+            if pending and pending[0][0] in text[seen:]:
                 _, send = pending.pop(0)
+                seen = len(text)
                 assert proc.stdin
                 proc.stdin.write(send.encode())
                 proc.stdin.flush()
@@ -148,7 +164,7 @@ class Machine:
         script_file.write_text(script)
         setup_disk.put("\\netbooty-test.txt", script_file)
         setup_disk.put("\\EFI\\BOOT\\BOOTX64.EFI", EFI_DIR / "testsetup.efi")
-        r = self.boot(timeout=60)
+        r = self.boot(timeout=60, enforce=False)
         setup_disk.delete("\\EFI\\BOOT\\BOOTX64.EFI")
         assert r.has("TESTSETUP: done"), r.output
         return r
@@ -158,3 +174,18 @@ def patch(workdir: Path, *args: str) -> Path:
     out = workdir / "netbooty.efi"
     run(SETUP_BIN, "patch", *args, EFI_DIR / "netbooty.efi", out)
     return out
+
+
+def make_test_key(directory: Path) -> tuple[Path, Path, Path]:
+    """Throwaway signing key (like `netbooty-setup keygen`) for QEMU tests."""
+    key, crt, der = directory / "test.key", directory / "test.crt", directory / "test.der"
+    run("openssl", "req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "3650",
+        "-subj", "/CN=NetBooty test key/", "-addext", "extendedKeyUsage=codeSigning",
+        "-keyout", key, "-out", crt)
+    run("openssl", "x509", "-outform", "DER", "-in", crt, "-out", der)
+    return key, crt, der
+
+
+def sign(src: Path, dst: Path, key: Path, crt: Path) -> Path:
+    run("sbsign", "--key", key, "--cert", crt, "--output", dst, src)
+    return dst

@@ -93,6 +93,8 @@ pub struct LoadOption {
     /// Concatenated media file path nodes, e.g. `\EFI\ubuntu\shimx64.efi`.
     pub loader_path: String,
     pub partition: Option<PartitionSig>,
+    /// Bytes after the device path (e.g. the second-stage path shim reads).
+    pub optional_data: Vec<u8>,
 }
 
 impl LoadOption {
@@ -121,7 +123,16 @@ impl LoadOption {
                 _ => {}
             }
         }
-        Some(Self { attributes, description, file_path_list, loader_path, partition })
+        let optional_data = b[fpl_start + fpl_len..].to_vec();
+        Some(Self { attributes, description, file_path_list, loader_path, partition, optional_data })
+    }
+
+    /// Optional data read as a NUL-terminated UCS-2 string, as shim does.
+    pub fn optional_text(&self) -> Option<String> {
+        if self.optional_data.len() < 2 || !self.optional_data.len().is_multiple_of(2) {
+            return None;
+        }
+        Some(utf16_nul(&self.optional_data).0)
     }
 
     pub fn active(&self) -> bool {
@@ -149,6 +160,14 @@ fn path_suffix_match(entry: &str, want: &str) -> bool {
 fn contains_ignore_case(hay: &str, needle: &str) -> bool {
     let hay = hay.to_lowercase();
     hay.contains(&needle.to_lowercase())
+}
+
+/// Does this entry start `image_path` (an ESP-relative path such as
+/// `\\EFI\\netbooty\\netbooty.efi`), directly or as shim's second stage?
+pub fn launches(opt: &LoadOption, image_path: &str) -> bool {
+    let want = norm_path(image_path);
+    !want.is_empty()
+        && (norm_path(&opt.loader_path) == want || opt.optional_text().is_some_and(|t| norm_path(&t) == want))
 }
 
 /// Does this `Boot####` entry satisfy every enabled match rule of `t`?
@@ -312,6 +331,15 @@ mod tests {
         assert_eq!(o.loader_path, "\\EFI\\Microsoft\\Boot\\bootmgfw.efi");
         assert_eq!(o.partition, Some(PartitionSig { sig_type: 2, sig: GUID_A }));
         assert_eq!(hd_node_offset(&o.file_path_list), Some(0));
+        assert_eq!(o.optional_data, b"opt");
+        assert_eq!(o.optional_text(), None);
+
+        let mut fpl = file_node("\\EFI\\ubuntu\\shimx64.efi");
+        fpl.extend(end_node());
+        let data: Vec<u8> =
+            "\\EFI\\netbooty\\netbooty.efi".encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        let o = LoadOption::parse(&load_option(1, "NetBooty", &fpl, &data)).unwrap();
+        assert_eq!(o.optional_text().as_deref(), Some("\\EFI\\netbooty\\netbooty.efi"));
     }
 
     #[test]
@@ -386,6 +414,22 @@ mod tests {
             (2, entry(1, "new", Some(GUID_B), "\\EFI\\Microsoft\\Boot\\bootmgfw.efi")),
         ];
         assert_eq!(resolve(&target("bootmgfw.efi", "", None), &e, None), Resolution::Found(2));
+    }
+
+    #[test]
+    fn recognizes_entries_that_launch_netbooty() {
+        let direct = entry(1, "NetBooty", Some(GUID_A), "\\EFI\\netbooty\\netbooty.efi");
+        assert!(launches(&direct, "\\EFI\\NETBOOTY\\netbooty.efi"));
+        let mut fpl = hd_node(1, 2048, 1 << 20, 2, GUID_A);
+        fpl.extend(file_node("\\EFI\\ubuntu\\shimx64.efi"));
+        fpl.extend(end_node());
+        let data: Vec<u8> =
+            "\\EFI\\netbooty\\netbooty.efi".encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        let chained = LoadOption::parse(&load_option(1, "x", &fpl, &data)).unwrap();
+        assert!(launches(&chained, "\\EFI\\netbooty\\netbooty.efi"));
+        let ubuntu = entry(1, "ubuntu", Some(GUID_A), "\\EFI\\ubuntu\\shimx64.efi");
+        assert!(!launches(&ubuntu, "\\EFI\\netbooty\\netbooty.efi"));
+        assert!(!launches(&ubuntu, ""));
     }
 
     #[test]

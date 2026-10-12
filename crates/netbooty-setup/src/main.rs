@@ -1,13 +1,15 @@
 //! Host-side NetBooty tool: provisions the `.nbtycfg` section of a NetBooty
-//! binary and sets one-shot boot requests from a running OS.
+//! binary, installs it, and sets one-shot boot requests from a running OS.
 
 mod efivars;
+mod install;
 mod pe;
+mod system;
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use netbooty_cfg::config::{
     Config, Fallback, MatchFlags, MenuMode, PartitionSig, ResetKind, Target, valid_name,
 };
@@ -38,34 +40,41 @@ enum FallbackArg {
     Chainload,
 }
 
+/// Configuration written into the `.nbtycfg` section.
+#[derive(Args)]
+struct ConfigArgs {
+    /// Target spec: name=<n>[,path=<loader path>][,desc=<text>][,part=<guid>|auto][,hint=<hex>|auto][,key=<c>].
+    /// `auto` fills the value from the matching Boot#### entry on this machine.
+    #[arg(long = "target", required = true)]
+    targets: Vec<String>,
+    /// Target name to boot when nothing else decides, or `exit`.
+    #[arg(long, default_value = "exit")]
+    default: String,
+    #[arg(long, value_enum, default_value = "on-key")]
+    menu: MenuArg,
+    #[arg(long, default_value_t = 5)]
+    menu_timeout: u16,
+    #[arg(long, value_enum, default_value = "warm")]
+    reset: ResetArg,
+    #[arg(long, value_enum, default_value = "exit")]
+    fallback: FallbackArg,
+    /// Do not move NetBooty back to the front of BootOrder on each boot.
+    #[arg(long)]
+    no_reassert: bool,
+    /// 32 hex digits; default keeps the existing ID or generates a new one.
+    #[arg(long)]
+    client_id: Option<String>,
+    /// Directory with efivarfs-style files (default /sys/firmware/efi/efivars).
+    #[arg(long)]
+    efivars: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Write a configuration into a NetBooty binary (before signing).
     Patch {
-        /// Target spec: name=<n>[,path=<loader path>][,desc=<text>][,part=<guid>|auto][,hint=<hex>|auto][,key=<c>].
-        /// `auto` fills the value from the matching Boot#### entry on this machine.
-        #[arg(long = "target", required = true)]
-        targets: Vec<String>,
-        /// Target name to boot when nothing else decides, or `exit`.
-        #[arg(long, default_value = "exit")]
-        default: String,
-        #[arg(long, value_enum, default_value = "on-key")]
-        menu: MenuArg,
-        #[arg(long, default_value_t = 5)]
-        menu_timeout: u16,
-        #[arg(long, value_enum, default_value = "warm")]
-        reset: ResetArg,
-        #[arg(long, value_enum, default_value = "exit")]
-        fallback: FallbackArg,
-        /// Do not move NetBooty back to the front of BootOrder on each boot.
-        #[arg(long)]
-        no_reassert: bool,
-        /// 32 hex digits; default keeps the input's ID or generates a new one.
-        #[arg(long)]
-        client_id: Option<String>,
-        /// Directory with efivarfs-style files (default /sys/firmware/efi/efivars).
-        #[arg(long)]
-        efivars: Option<PathBuf>,
+        #[command(flatten)]
+        cfg: ConfigArgs,
         input: PathBuf,
         output: PathBuf,
     },
@@ -77,6 +86,48 @@ enum Cmd {
         #[arg(long)]
         efivars: Option<PathBuf>,
     },
+    /// Create a dedicated Secure Boot signing key (MOK) for NetBooty.
+    Keygen {
+        #[arg(long, default_value = install::KEY_DIR)]
+        dir: PathBuf,
+    },
+    /// Configure, sign and install NetBooty to the ESP and create its boot entry.
+    /// Does not make it the default unless --first is given.
+    Install {
+        #[command(flatten)]
+        cfg: ConfigArgs,
+        /// Unprovisioned netbooty.efi to install.
+        #[arg(long)]
+        image: PathBuf,
+        /// Mount point of the ESP to install to (default: auto-detect).
+        #[arg(long)]
+        esp: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "auto")]
+        mode: install::Mode,
+        /// ESP-relative shim to chain through, e.g. \EFI\ubuntu\shimx64.efi (default: auto-detect).
+        #[arg(long)]
+        shim: Option<String>,
+        /// Signing key and certificate (default: the keygen key for shim mode).
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long)]
+        cert: Option<PathBuf>,
+        /// Put NetBooty first in BootOrder (refused while its key is not enrolled).
+        #[arg(long)]
+        first: bool,
+        /// Show what would be done without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove NetBooty's boot entry and files from the ESP.
+    Uninstall {
+        #[arg(long)]
+        esp: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Read-only report of firmware, boot entries, ESPs and NetBooty state.
+    Doctor,
 }
 
 fn parse_hex<const N: usize>(s: &str) -> Result<[u8; N]> {
@@ -108,7 +159,7 @@ fn fmt_guid(g: &[u8; 16]) -> String {
     )
 }
 
-fn fmt_part(p: &PartitionSig) -> String {
+pub(crate) fn fmt_part(p: &PartitionSig) -> String {
     match p.sig_type {
         2 => fmt_guid(&p.sig),
         _ => format!("mbr:{:02x}{:02x}{:02x}{:02x}", p.sig[3], p.sig[2], p.sig[1], p.sig[0]),
@@ -171,7 +222,10 @@ fn parse_target(
             Some(e) => e,
             None => entries.insert(efivars.boot_entries()?),
         };
-        let found: Vec<_> = entries.iter().filter(|(_, o)| matches(&t, o)).collect();
+        // NetBooty's own entry can share loader and partition with a target
+        // (shim chaining), so it is never a candidate.
+        let found: Vec<_> =
+            entries.iter().filter(|(_, o)| !install::is_netbooty_entry(o) && matches(&t, o)).collect();
         let (num, opt) = match found.as_slice() {
             [one] => *one,
             [] => bail!("target {}: no Boot#### entry matches", t.name),
@@ -224,63 +278,54 @@ fn print_config(c: &Config) {
     }
 }
 
+fn build_config(a: &ConfigArgs, existing: Option<&Config>) -> Result<Config> {
+    let store = efivars::Store::new(a.efivars.clone());
+    let mut entries = None;
+    let targets =
+        a.targets.iter().map(|s| parse_target(s, &mut entries, &store)).collect::<Result<Vec<_>>>()?;
+    let mut cfg = Config {
+        provisioned: true,
+        targets,
+        menu_mode: match a.menu {
+            MenuArg::OnKey => MenuMode::OnKey,
+            MenuArg::Always => MenuMode::Always,
+        },
+        menu_timeout_s: a.menu_timeout,
+        reset: match a.reset {
+            ResetArg::Warm => ResetKind::Warm,
+            ResetArg::Cold => ResetKind::Cold,
+        },
+        fallback: match a.fallback {
+            FallbackArg::Exit => Fallback::Exit,
+            FallbackArg::Chainload => Fallback::Chainload,
+        },
+        reassert_bootorder: !a.no_reassert,
+        ..Config::default()
+    };
+    cfg.default = match a.default.as_str() {
+        "exit" => None,
+        name => Some(cfg.target_index(name).with_context(|| format!("default {name:?} is not a target"))?),
+    };
+    cfg.client_id = match &a.client_id {
+        Some(s) => parse_hex(s)?,
+        None => match existing {
+            Some(c) if c.provisioned && c.client_id != [0; 16] => c.client_id,
+            _ => {
+                let mut id = [0u8; 16];
+                getrandom::fill(&mut id).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+                id
+            }
+        },
+    };
+    Ok(cfg)
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Patch {
-            targets,
-            default,
-            menu,
-            menu_timeout,
-            reset,
-            fallback,
-            no_reassert,
-            client_id,
-            efivars,
-            input,
-            output,
-        } => {
+        Cmd::Patch { cfg, input, output } => {
             let mut image = std::fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
             let current = pe::read_config(&image)?;
-            let store = efivars::Store::new(efivars);
-
-            let mut entries = None;
-            let targets =
-                targets.iter().map(|s| parse_target(s, &mut entries, &store)).collect::<Result<Vec<_>>>()?;
-            let mut cfg = Config {
-                provisioned: true,
-                targets,
-                menu_mode: match menu {
-                    MenuArg::OnKey => MenuMode::OnKey,
-                    MenuArg::Always => MenuMode::Always,
-                },
-                menu_timeout_s: menu_timeout,
-                reset: match reset {
-                    ResetArg::Warm => ResetKind::Warm,
-                    ResetArg::Cold => ResetKind::Cold,
-                },
-                fallback: match fallback {
-                    FallbackArg::Exit => Fallback::Exit,
-                    FallbackArg::Chainload => Fallback::Chainload,
-                },
-                reassert_bootorder: !no_reassert,
-                ..Config::default()
-            };
-            cfg.default = match default.as_str() {
-                "exit" => None,
-                name => Some(
-                    cfg.target_index(name).with_context(|| format!("default {name:?} is not a target"))?,
-                ),
-            };
-            cfg.client_id = match client_id {
-                Some(s) => parse_hex(&s)?,
-                None if current.provisioned && current.client_id != [0; 16] => current.client_id,
-                None => {
-                    let mut id = [0u8; 16];
-                    getrandom::fill(&mut id).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
-                    id
-                }
-            };
-
+            let cfg = build_config(&cfg, Some(&current))?;
             let bytes = cfg.encode().map_err(|e| anyhow::anyhow!("invalid config: {e:?}"))?;
             pe::write_config(&mut image, &bytes)?;
             std::fs::write(&output, &image).with_context(|| format!("writing {}", output.display()))?;
@@ -298,6 +343,20 @@ fn main() -> Result<()> {
                 println!("NetBooty will boot {target} on the next boot");
             }
         }
+        Cmd::Keygen { dir } => install::keygen(&dir)?,
+        Cmd::Install { cfg, image, esp, mode, shim, key, cert, first, dry_run } => {
+            let opts = install::InstallOpts { image, esp, mode, shim, key, cert, first, dry_run };
+            install::install(opts, |existing, first| {
+                let mut c = build_config(&cfg, existing)?;
+                // Until NetBooty is the default, it must not promote itself
+                // when started through a one-shot BootNext test.
+                c.reassert_bootorder &= first;
+                print_config(&c);
+                Ok(c)
+            })?;
+        }
+        Cmd::Uninstall { esp, dry_run } => install::uninstall(esp, dry_run)?,
+        Cmd::Doctor => install::doctor()?,
     }
     Ok(())
 }

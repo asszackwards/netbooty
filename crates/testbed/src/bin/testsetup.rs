@@ -1,12 +1,15 @@
 //! Prepares UEFI variables for a QEMU test from `\netbooty-test.txt` on its
 //! own volume, then powers off. One command per line:
 //!
-//!   entry <hex> <description> <path> [fs=<n>]   short-form HD()/File() entry
+//!   entry <hex> <description> <path> [fs=<n>] [opt=<text>]
+//!                                                short-form HD()/File() entry; `opt`
+//!                                                is stored as UCS-2 optional data (shim)
 //!   order <hex> <hex> ...                        BootOrder
 //!   bootnext <hex>                               native BootNext
 //!   nbnext <name>                                NetBootyNext
 //!   del <hex>                                    delete Boot####
 //!   hook <value>                                 NetBootyTestHook (test-hooks builds)
+//!   mok <path>                                   pre-enroll a DER cert in shim's MokList
 //!
 //! `<path>` is looked up on every FAT volume; `fs=<n>` picks the n-th volume
 //! (0-based) that has it when several do.
@@ -79,7 +82,12 @@ fn run(line: &str) {
             let mut fpl = hd.clone();
             fpl.extend(build::file_node(path));
             fpl.extend(build::end_node());
-            let opt = build::load_option(1, &desc.replace('_', " "), &fpl, b"");
+            let data: Vec<u8> = rest
+                .iter()
+                .find_map(|w| w.strip_prefix("opt="))
+                .map(|o| o.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect())
+                .unwrap_or_default();
+            let opt = build::load_option(1, &desc.replace('_', " "), &fpl, &data);
             runtime::set_variable(&boot_name(hex(num)), &GLOBAL, attrs(), &opt).unwrap();
         }
         ["order", nums @ ..] => {
@@ -100,6 +108,25 @@ fn run(line: &str) {
         }
         ["del", num] => {
             let _ = runtime::delete_variable(&boot_name(hex(num)), &GLOBAL);
+        }
+        ["mok", der_path] => {
+            // What MokManager stores after "Enroll MOK": one EFI_SIGNATURE_LIST
+            // holding an X.509 certificate, boot-services-only (shim rejects a
+            // MokList that the OS could write).
+            let sfs = boot::get_image_file_system(boot::image_handle()).unwrap();
+            let der = FileSystem::new(sfs).read(Path::new(&CString16::try_from(*der_path).unwrap())).unwrap();
+            let x509 = Guid::parse_or_panic("a5c059a1-94e4-4aa7-87b5-ab155c2bf072").to_bytes();
+            let owner = Guid::parse_or_panic("605dab50-e046-4300-abb6-3dd810dd8b23");
+            let sig_size = 16 + der.len() as u32;
+            let mut list = Vec::new();
+            list.extend_from_slice(&x509);
+            list.extend_from_slice(&(28 + sig_size).to_le_bytes());
+            list.extend_from_slice(&0u32.to_le_bytes());
+            list.extend_from_slice(&sig_size.to_le_bytes());
+            list.extend_from_slice(&owner.to_bytes());
+            list.extend_from_slice(&der);
+            let bs_only = VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS;
+            runtime::set_variable(cstr16!("MokList"), &VariableVendor(owner), bs_only, &list).unwrap();
         }
         [] => {}
         _ => panic!("bad testsetup line: {line}"),
