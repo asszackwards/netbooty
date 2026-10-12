@@ -44,7 +44,7 @@ const SBAT_TEXT: &[u8] = concat!(
     "sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md\n",
     "netbooty,1,NetBooty,netbooty,",
     env!("CARGO_PKG_VERSION"),
-    ",https://github.com/netbooty/netbooty\n"
+    ",https://github.com/asszackwards/netbooty\n"
 )
 .as_bytes();
 
