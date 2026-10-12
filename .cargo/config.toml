@@ -1,0 +1,4 @@
+# No global build target: the workspace mixes UEFI and host crates.
+[alias]
+uefi = "build --release --target x86_64-unknown-uefi -p netbooty -p testbed"
+uefi-aa64 = "build --release --target aarch64-unknown-uefi -p netbooty -p testbed"

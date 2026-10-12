@@ -1,0 +1,11 @@
+[package]
+name = "testbed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+netbooty-cfg.workspace = true
+uefi.workspace = true
+log.workspace = true

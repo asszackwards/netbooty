@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/netbooty-cfg", "crates/netbooty", "crates/netbooty-setup", "crates/testbed"]
+default-members = ["crates/netbooty-cfg", "crates/netbooty-setup"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+netbooty-cfg = { path = "crates/netbooty-cfg" }
+uefi = { version = "0.41", features = ["panic_handler", "logger", "global_allocator", "alloc"] }
+log = { version = "0.4", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
