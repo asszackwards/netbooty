@@ -161,9 +161,10 @@ also enter it on the PC's card.
   on), and in the OS's network card settings if it should also wake from sleep.
 - Windows does not answer ping by default. In an elevated PowerShell:
   `Enable-NetFirewallRule -Name FPS-ICMP4-ERQ-In`.
-- Pinging without root needs the host's `net.ipv4.ping_group_range` to include
-  the container's group (10000). Most distributions allow every group; if not,
-  the page says *Power status unavailable*.
+- The container pings with a raw socket its launcher opens before dropping
+  root, so no host setting is needed. If the page says *Power status
+  unavailable*, the container was started without Docker's default
+  capabilities (it needs `NET_RAW`).
 
 Notes:
 - PCs find the server by broadcast and also ask its address directly, for

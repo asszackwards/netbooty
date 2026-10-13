@@ -232,3 +232,46 @@ def test_real_ping_of_localhost():
         pytest.skip(f"unprivileged ping not permitted here: {e}")
     assert ttl == 64
     assert ping("192.0.2.1", 0.3) is None  # TEST-NET-1: never answers
+
+
+def ip_packet(src: str, ttl: int, icmp: bytes) -> bytes:
+    return bytes([0x45, 0, 0, 20 + len(icmp), 0, 0, 0, 0, ttl, 1, 0, 0]) + socket.inet_aton(src) + \
+        socket.inet_aton("10.0.0.5") + icmp
+
+
+def test_raw_echo_packets():
+    from netbooty_web.power import checksum, echo_request, parse_reply
+    req = echo_request(0x1234, 7)
+    assert req[0] == 8 and checksum(req) == 0  # a valid checksum sums to zero
+    reply = b"\0" + req[1:]
+    assert parse_reply(ip_packet("10.0.0.9", 128, reply), "10.0.0.9", 0x1234, 7) == 128
+    assert parse_reply(ip_packet("10.0.0.8", 128, reply), "10.0.0.9", 0x1234, 7) is None   # other host
+    assert parse_reply(ip_packet("10.0.0.9", 128, reply), "10.0.0.9", 0x1234, 8) is None   # older request
+    assert parse_reply(ip_packet("10.0.0.9", 64, req), "10.0.0.9", 0x1234, 7) is None      # a request, not a reply
+    assert parse_reply(b"short", "10.0.0.9", 0x1234, 7) is None
+
+
+def test_raw_pinger_skips_other_icmp():
+    from netbooty_web.power import RawPinger
+
+    class FakeSock:
+        def __init__(self):
+            self.inbox = []
+
+        def sendto(self, data, addr):
+            reply = b"\0" + data[1:]
+            self.inbox = [ip_packet(addr[0], 64, data),                  # our own request, looped back
+                          ip_packet("10.0.0.7", 128, reply),            # someone else's reply
+                          ip_packet(addr[0], 128, reply)]
+
+        def settimeout(self, t):
+            pass
+
+        def recv(self, n):
+            if not self.inbox:
+                raise TimeoutError
+            return self.inbox.pop(0)
+
+    p = RawPinger(FakeSock())
+    assert p("10.0.0.9") == 128
+    assert p("10.0.0.9") == 128  # next sequence number still matches its own reply

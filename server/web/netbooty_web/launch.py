@@ -15,6 +15,7 @@ import os
 import pwd
 import grp
 import signal
+import socket
 import subprocess
 import sys
 
@@ -48,13 +49,22 @@ def main() -> None:
     gid = grp.getgrnam(GROUP).gr_gid
     fix_permissions(data, pwd.getpwnam("responder").pw_uid, gid)
 
-    def start(user: str, cmd: list[str]) -> subprocess.Popen:
+    def start(user: str, cmd: list[str], env=None, fds=()) -> subprocess.Popen:
         return subprocess.Popen(cmd, user=user, group=GROUP, extra_groups=[], umask=0o002,
-                                env={**os.environ, "HOME": "/tmp"})
+                                env={**os.environ, "HOME": "/tmp", **(env or {})}, pass_fds=fds)
+
+    # The web app pings PCs for their power status. A raw ICMP socket opened
+    # here (root has CAP_NET_RAW) works whatever the host's ping_group_range.
+    try:
+        icmp = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+        web_env, web_fds = {"NETBOOTY_ICMP_FD": str(icmp.fileno())}, (icmp.fileno(),)
+    except OSError as e:
+        print(f"no raw ICMP socket ({e}); the web app will try unprivileged ping", file=sys.stderr, flush=True)
+        web_env, web_fds = {}, ()
 
     procs = [
         start("responder", [RESPONDER, "serve"]),
-        start("web", [sys.executable, "-m", "netbooty_web"]),
+        start("web", [sys.executable, "-m", "netbooty_web"], web_env, web_fds),
     ]
 
     stopping = False

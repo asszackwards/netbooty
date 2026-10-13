@@ -6,12 +6,17 @@ last boot (if it asked during this power-on), plus a TTL hint (Windows
 answers with 128, Linux with 64).
 
 Needs host networking (to reach the LAN with broadcasts and read the host's
-ARP table) and `net.ipv4.ping_group_range` covering this process's group
-(the default on systemd distributions).
+ARP table). Pings go out over a raw ICMP socket the launcher opens as root
+and hands over (NETBOOTY_ICMP_FD), so no host setting is needed; without
+one, an unprivileged ICMP socket is used, which needs the host's
+`net.ipv4.ping_group_range` to cover this process's group.
 """
 
 from __future__ import annotations
 
+import itertools
+import os
+import random
 import socket
 import struct
 import sys
@@ -51,6 +56,70 @@ def ping(ip: str, timeout: float = 1.0) -> int | None:
                     return int.from_bytes(value[:4], sys.byteorder)
             return 0
     return None
+
+
+def checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\0"
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return ~total & 0xFFFF
+
+
+def echo_request(ident: int, seq: int) -> bytes:
+    body = b"netbooty"
+    head = struct.pack("!BBHHH", 8, 0, 0, ident, seq)
+    return struct.pack("!BBHHH", 8, 0, checksum(head + body), ident, seq) + body
+
+
+def parse_reply(packet: bytes, ip: str, ident: int, seq: int) -> int | None:
+    """TTL of a raw-socket packet (IP header included) if it is the echo
+    reply from `ip` to our request, else None."""
+    if len(packet) < 20:
+        return None
+    ihl = (packet[0] & 0x0F) * 4
+    icmp = packet[ihl:ihl + 8]
+    if len(icmp) < 8 or socket.inet_ntoa(packet[12:16]) != ip:
+        return None
+    kind, _, _, rid, rseq = struct.unpack("!BBHHH", icmp)
+    return packet[8] if (kind, rid, rseq) == (0, ident, seq) else None
+
+
+class RawPinger:
+    """Pings over one raw ICMP socket (opened by a privileged parent).
+    A raw socket sees every ICMP packet, so replies are matched by
+    identifier, sequence number and source."""
+
+    def __init__(self, sock: socket.socket):
+        self.sock = sock
+        self.ident = random.randrange(1, 0xFFFF)
+        self.seq = itertools.count(1)
+        self.lock = threading.Lock()
+
+    def __call__(self, ip: str, timeout: float = 1.0) -> int | None:
+        with self.lock:
+            seq = next(self.seq) & 0xFFFF
+            self.sock.sendto(echo_request(self.ident, seq), (ip, 0))
+            deadline = time.monotonic() + timeout
+            while (left := deadline - time.monotonic()) > 0:
+                self.sock.settimeout(left)
+                try:
+                    packet = self.sock.recv(1500)
+                except (TimeoutError, socket.timeout):
+                    return None
+                ttl = parse_reply(packet, ip, self.ident, seq)
+                if ttl is not None:
+                    return ttl
+            return None
+
+
+def make_pinger():
+    """The raw socket handed over by the launcher if there is one, else `ping`."""
+    fd = os.environ.get("NETBOOTY_ICMP_FD")
+    if fd and fd.isdigit():
+        return RawPinger(socket.socket(fileno=int(fd)))
+    return ping
 
 
 def arp_mac(ip: str, path: str = "/proc/net/arp") -> str | None:
@@ -133,7 +202,8 @@ class Monitor:
                 ttl = self.pinger(ip, 1.0)
             except OSError as e:
                 if self.error is None:
-                    self.error = f"ping not permitted ({e}); check net.ipv4.ping_group_range"
+                    self.error = (f"ping not permitted ({e}); run the server with the launcher "
+                                  "(as in compose.yaml), or allow it with net.ipv4.ping_group_range")
                     print(f"power monitor: {self.error}", file=sys.stderr, flush=True)
                 return
             self.error = None

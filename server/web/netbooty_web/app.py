@@ -27,7 +27,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from .power import WOL_PORT, Monitor
+from .power import WOL_PORT, Monitor, make_pinger
 from .store import StateError, Store
 
 SESSION_SECS = 12 * 3600
@@ -425,6 +425,7 @@ def main() -> None:
     wol_host, _, wol_port = wol.partition(":")
     cfg.monitor.wol_addr = (wol_host, int(wol_port or WOL_PORT))
     cfg.monitor.interval = float(os.environ.get("NETBOOTY_PING_SECS", "15"))
+    cfg.monitor.pinger = make_pinger()
     cfg.monitor.start()
     bind = os.environ.get("NETBOOTY_WEB_BIND", "0.0.0.0")
     port = int(os.environ.get("NETBOOTY_WEB_PORT", "8470"))
