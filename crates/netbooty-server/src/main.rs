@@ -106,12 +106,32 @@ fn lan_ip() -> Option<[u8; 4]> {
     }
 }
 
-fn advertise(net: &Net) -> Result<Option<[u8; 4]>> {
+/// The address for the pairing code, and whether it was set explicitly.
+fn advertise(net: &Net) -> Result<(Option<[u8; 4]>, bool)> {
     match net.advertise_ip.as_deref() {
-        Some("none") => Ok(None),
-        Some(s) => Ok(Some(s.parse::<Ipv4Addr>().with_context(|| format!("bad address {s:?}"))?.octets())),
-        None => Ok(lan_ip()),
+        Some("none") => Ok((None, true)),
+        Some(s) => {
+            Ok((Some(s.parse::<Ipv4Addr>().with_context(|| format!("bad address {s:?}"))?.octets()), true))
+        }
+        None => Ok((lan_ip(), false)),
     }
+}
+
+/// Detected inside a container that is not on the host's network (its
+/// address is on a Docker bridge): broadcasts from PCs will not reach it.
+fn container_network_warning(ip: Option<[u8; 4]>, port: u16) -> Option<String> {
+    let ip = ip?;
+    let in_container =
+        std::path::Path::new("/.dockerenv").exists() || std::path::Path::new("/run/.containerenv").exists();
+    let bridge = ip[0] == 172 && (16..32).contains(&ip[1]);
+    (in_container && bridge).then(|| {
+        format!(
+            "warning: this responder seems to be on a container network ({}). PCs find it by broadcast, which \
+             only works with host networking (`network_mode: host` in compose.yaml); otherwise publish UDP \
+             {port} and set NETBOOTY_ADVERTISE_IP to the host's LAN address.",
+            Ipv4Addr::from(ip),
+        )
+    })
 }
 
 fn random_seed() -> Result<[u8; 32]> {
@@ -230,10 +250,14 @@ fn main() -> Result<()> {
                 st.write_seed("current", &random_seed()?)?;
                 println!("created a new signing key");
             }
-            let public = st.publish(net.port, advertise(&net)?)?;
+            let (ip, configured) = advertise(&net)?;
+            if !configured && let Some(w) = container_network_warning(ip, net.port) {
+                eprintln!("{w}");
+            }
+            let public = st.publish(net.port, ip, configured)?;
             println!("fingerprint {}", public.fingerprints.join(" / "));
             println!("pairing code: {}", public.pairing_code);
-            serve::serve(&st, bind, net.port)?;
+            serve::serve(&st, bind, net.port, &public.pairing_code)?;
         }
         Cmd::Keygen { next, promote, net } => {
             if promote {
@@ -249,14 +273,16 @@ fn main() -> Result<()> {
                 st.write_seed(name, &random_seed()?)?;
                 println!("created the {name} key");
             }
-            let public = st.publish(net.port, advertise(&net)?)?;
+            let (ip, configured) = advertise(&net)?;
+            let public = st.publish(net.port, ip, configured)?;
             println!("pairing code: {}", public.pairing_code);
             if next {
                 println!("re-pair each PC with this code, then run `netbooty-server keygen --promote`");
             }
         }
         Cmd::Pair { net } => {
-            let public = st.publish(net.port, advertise(&net)?)?;
+            let (ip, configured) = advertise(&net)?;
+            let public = st.publish(net.port, ip, configured)?;
             println!("{}", public.pairing_code);
             eprintln!("fingerprint {}", public.fingerprints.join(" / "));
             eprintln!("on the PC: sudo netbooty-setup pair '{}'", public.pairing_code);

@@ -222,7 +222,16 @@ enum Cmd {
     /// Pair with a NetBooty server using the code from its web page, then
     /// announce this PC so it can be approved there.
     Pair {
-        code: String,
+        /// The code from the web page; omit with --discover.
+        #[arg(required_unless_present = "discover")]
+        code: Option<String>,
+        /// Find the server on the LAN instead of pasting the code; you
+        /// confirm its fingerprint against the server's web page.
+        #[arg(long, conflicts_with = "code")]
+        discover: bool,
+        /// Port to discover on.
+        #[arg(long, default_value_t = netbooty_cfg::proto::DEFAULT_PORT)]
+        port: u16,
         /// Don't announce this PC to the server.
         #[arg(long)]
         no_announce: bool,
@@ -315,8 +324,20 @@ fn main() -> Result<()> {
         }
         Cmd::Doctor => install::doctor()?,
         Cmd::Uninstall { esp, dry_run } => install::uninstall(esp, dry_run)?,
-        Cmd::Pair { code, no_announce, dry_run } => {
+        Cmd::Pair { code, discover, port, no_announce, dry_run } => {
             let mut s = saved_settings()?;
+            let code = match code {
+                Some(c) => c,
+                None => {
+                    debug_assert!(discover);
+                    if !interactive {
+                        bail!(
+                            "--discover needs a terminal to confirm the fingerprint; pass the code instead"
+                        );
+                    }
+                    wizard::pick_discovered(port)?.context("no server chosen")?
+                }
+            };
             let p = pair::apply(&code, &mut s.network)?;
             println!("server key fingerprint: {}", pair::fingerprints(&s.network));
             println!("compare it with the fingerprint on the server's web page.");

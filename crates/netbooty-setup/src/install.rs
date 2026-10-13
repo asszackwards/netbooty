@@ -304,14 +304,16 @@ pub fn installed_config() -> Option<netbooty_cfg::config::Config> {
 /// Default NetBooty image: the installed copy, else the build next to this
 /// tool (`target/<profile>/netbooty-setup` -> `target/x86_64-unknown-uefi/release/netbooty.efi`).
 pub fn default_image() -> Option<PathBuf> {
-    let installed = PathBuf::from(settings::IMAGE_PATH);
-    if installed.exists() {
-        return Some(installed);
-    }
-    let exe = std::env::current_exe().ok()?;
+    // A build next to the tool being run wins: running a freshly built
+    // `target/release/netbooty-setup` must install the matching NetBooty,
+    // not the older copy installed earlier. The installed tool in
+    // /usr/local/sbin has no such neighbour and uses the installed copy.
     let triple = if cfg!(target_arch = "aarch64") { "aarch64-unknown-uefi" } else { "x86_64-unknown-uefi" };
-    let built = exe.parent()?.parent()?.join(triple).join("release").join("netbooty.efi");
-    built.exists().then_some(built)
+    let built = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join(triple).join("release").join("netbooty.efi")))
+        .filter(|p| p.exists());
+    built.or_else(|| Some(PathBuf::from(settings::IMAGE_PATH)).filter(|p| p.exists()))
 }
 
 pub struct InstallOpts {

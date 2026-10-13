@@ -420,6 +420,30 @@ fn configure(store: &Store, previous: Option<&Settings>) -> Result<bool> {
     Ok(true)
 }
 
+/// Discover servers on the LAN and let the user confirm one by fingerprint.
+/// Returns its pairing code (pointing at the address that answered).
+pub fn pick_discovered(port: u16) -> Result<Option<String>> {
+    println!("Looking for NetBooty servers on the LAN (UDP {port})...");
+    let offers = crate::pair::discover(port, std::time::Duration::from_secs(2))?;
+    if offers.is_empty() {
+        println!("No server answered. Is it running, with host networking, and is UDP {port} allowed?");
+        return Ok(None);
+    }
+    let labels: Vec<String> =
+        offers.iter().map(|o| format!("{}  fingerprint {}", o.from, o.fingerprints())).collect();
+    let pick = if offers.len() == 1 {
+        println!("Found: {}", labels[0]);
+        0
+    } else {
+        Select::with_theme(&theme()).with_prompt("Which server?").items(&labels).default(0).interact()?
+    };
+    let ok = Confirm::with_theme(&theme())
+        .with_prompt("Does this fingerprint match the one on the server's web page?")
+        .default(false)
+        .interact()?;
+    Ok(ok.then(|| offers[pick].code_for_source()))
+}
+
 /// The boot-server step: keep, change or add a pairing.
 fn ask_network(mut n: NetworkSettings) -> Result<NetworkSettings> {
     let paired = !n.keys.is_empty();
@@ -427,11 +451,8 @@ fn ask_network(mut n: NetworkSettings) -> Result<NetworkSettings> {
     if paired {
         choices.push(format!("Keep the paired server (key {})", crate::pair::fingerprints(&n)));
     }
-    choices.push(String::from(if paired {
-        "Pair with a different server"
-    } else {
-        "Pair with a NetBooty server"
-    }));
+    choices.push(String::from("Find a NetBooty server on the LAN"));
+    choices.push(String::from("Paste a pairing code"));
     choices.push(String::from(if paired {
         "Unpair (only report server replies)"
     } else {
@@ -445,7 +466,13 @@ fn ask_network(mut n: NetworkSettings) -> Result<NetworkSettings> {
     let offset = usize::from(!paired);
     match pick + offset {
         0 => {}
-        1 => loop {
+        1 => match pick_discovered(n.port)? {
+            Some(code) => {
+                crate::pair::apply(&code, &mut n)?;
+            }
+            None => println!("Keeping the current server setting."),
+        },
+        2 => loop {
             let code: String = Input::with_theme(&theme())
                 .with_prompt("Paste the pairing code from the server's web page")
                 .validate_with(|c: &String| -> Result<(), String> {

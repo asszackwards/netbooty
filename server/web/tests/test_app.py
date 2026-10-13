@@ -173,3 +173,15 @@ def test_never_touches_the_key(app):
     api(base, "GET", "/api/state")
     key_dir = str(tmp / "key")
     assert not [p for p in OPENED if p.startswith(key_dir)]
+
+
+def test_pairing_code_uses_the_address_the_page_was_reached_at():
+    from netbooty_web.app import pairing_code
+    detected = {"pairing_code": "netbooty-pair:1:47000:KEY:172.17.0.2", "server_ip_configured": False}
+    assert pairing_code(detected, "10.10.0.5:8470") == "netbooty-pair:1:47000:KEY:10.10.0.5"
+    assert pairing_code(detected, "server.lan:8470") == detected["pairing_code"]   # a name: keep
+    assert pairing_code(detected, "127.0.0.1:8470") == detected["pairing_code"]    # loopback: keep
+    configured = {**detected, "server_ip_configured": True}
+    assert pairing_code(configured, "10.10.0.5:8470") == detected["pairing_code"]
+    none = {"pairing_code": "netbooty-pair:1:47000:KEY", "server_ip_configured": False}
+    assert pairing_code(none, "10.10.0.5") == "netbooty-pair:1:47000:KEY:10.10.0.5"

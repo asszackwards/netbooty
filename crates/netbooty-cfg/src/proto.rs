@@ -9,6 +9,10 @@
 //!   for approval with its name and targets before it ever boots NetBooty:
 //!   `"NBTYA" ‖ client_id[16] ‖ len ‖ hostname ‖ count ‖ name[16]*count`.
 //!   It is unauthenticated and only ever creates a pairing request.
+//! - **Discover** (`"NBTYD1"`), broadcast by `netbooty-setup pair --discover`;
+//!   servers answer with an **offer**: `"NBTYP1" ‖ pairing code`. The code
+//!   holds only public data, and the user confirms its fingerprint against
+//!   the server's web page before trusting it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -24,6 +28,25 @@ pub const DEFAULT_PORT: u16 = crate::config::DEFAULT_PORT;
 pub const REQUEST_LEN: usize = 37;
 pub const REPLY_LEN: usize = 80;
 pub const MAX_HOSTNAME: usize = 63;
+pub const DISCOVER: &[u8; 6] = b"NBTYD1";
+pub const OFFER_MAGIC: &[u8; 6] = b"NBTYP1";
+const MAX_OFFER: usize = 512;
+
+/// A server's answer to [`DISCOVER`].
+pub fn offer(pairing_code: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(6 + pairing_code.len());
+    b.extend_from_slice(OFFER_MAGIC);
+    b.extend_from_slice(pairing_code.as_bytes());
+    b
+}
+
+/// The pairing code in an offer, if it is one.
+pub fn parse_offer(b: &[u8]) -> Option<&str> {
+    if b.len() > MAX_OFFER {
+        return None;
+    }
+    core::str::from_utf8(b.strip_prefix(OFFER_MAGIC.as_slice())?).ok()
+}
 
 pub fn request(client_id: &[u8; 16], nonce: &[u8; 16]) -> [u8; REQUEST_LEN] {
     let mut r = [0u8; REQUEST_LEN];
@@ -200,6 +223,14 @@ mod tests {
         assert_eq!(verify(&[0xFF; 80], &CID, &[NONCE], &[pk]), None);
         assert_eq!(verify(&r, &CID, &[NONCE], &[]), None);
         assert!(sign_reply(&SEED, &CID, &NONCE, Some("bad name")).is_none());
+    }
+
+    #[test]
+    fn discovery_offer() {
+        let o = offer("netbooty-pair:1:47000:abc");
+        assert_eq!(parse_offer(&o), Some("netbooty-pair:1:47000:abc"));
+        assert_eq!(parse_offer(b"NBTYX1abc"), None);
+        assert_eq!(parse_offer(&[b'N'; 600]), None);
     }
 
     #[test]

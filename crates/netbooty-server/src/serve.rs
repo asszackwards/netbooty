@@ -29,7 +29,8 @@ impl RateLimit {
     }
 }
 
-pub fn serve(store: &Store, bind: Ipv4Addr, port: u16) -> Result<()> {
+/// `pairing_code` is handed to `netbooty-setup pair --discover` on request.
+pub fn serve(store: &Store, bind: Ipv4Addr, port: u16, pairing_code: &str) -> Result<()> {
     let sock = UdpSocket::bind((bind, port)).with_context(|| format!("binding udp/{port}"))?;
     println!("listening on {bind}:{port}/udp");
     let mut rate = RateLimit { seen: HashMap::new() };
@@ -48,6 +49,9 @@ pub fn serve(store: &Store, bind: Ipv4Addr, port: u16) -> Result<()> {
         let data = &buf[..n];
         let result = if let Some((cid, nonce)) = proto::parse_request(data) {
             handle_request(store, &sock, from, &cid, &nonce)
+        } else if data == proto::DISCOVER {
+            println!("discovery request from {}", from.ip());
+            sock.send_to(&proto::offer(pairing_code), from).map(|_| ()).context("sending offer")
         } else if let Some(a) = proto::parse_announce(data) {
             record_request(store, from, &a.client_id, Some(a.hostname), a.targets)
         } else {
@@ -190,7 +194,7 @@ mod tests {
         assert_eq!(s.last_answer, "windows");
         assert_eq!(s.once_served.as_ref().unwrap().id, "x");
         // A pairing code from this store verifies too.
-        let code = store.publish(47000, None).unwrap().pairing_code;
+        let code = store.publish(47000, None, false).unwrap().pairing_code;
         assert_eq!(Pairing::decode(&code).unwrap().keys, keys);
         let _ = std::fs::remove_dir_all(&store.data);
     }

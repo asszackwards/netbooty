@@ -133,6 +133,10 @@ pub struct Public {
     pub version: u32,
     pub port: u16,
     pub server_ip: Option<String>,
+    /// The address was set explicitly (NETBOOTY_ADVERTISE_IP), not detected;
+    /// the web app then never replaces it with the address it was reached at.
+    #[serde(default)]
+    pub server_ip_configured: bool,
     pub keys: Vec<String>,
     pub fingerprints: Vec<String>,
     pub pairing_code: String,
@@ -244,7 +248,7 @@ impl Store {
         Ok(keys)
     }
 
-    pub fn publish(&self, port: u16, server_ip: Option<[u8; 4]>) -> Result<Public> {
+    pub fn publish(&self, port: u16, server_ip: Option<[u8; 4]>, configured: bool) -> Result<Public> {
         let keys = self.public_keys()?;
         if keys.is_empty() {
             bail!("no key yet; run `netbooty-server keygen`");
@@ -254,6 +258,7 @@ impl Store {
             version: VERSION,
             port,
             server_ip: server_ip.map(|ip| std::net::Ipv4Addr::from(ip).to_string()),
+            server_ip_configured: configured,
             keys: keys.iter().map(|k| b64_encode(k)).collect(),
             fingerprints: keys.iter().map(fingerprint).collect(),
             pairing_code: code,
@@ -346,7 +351,7 @@ mod tests {
         let store = Store::new(&dir);
         assert!(store.signing_seed().is_err());
         store.write_seed("current", &[3; 32]).unwrap();
-        let public = store.publish(47000, Some([10, 0, 0, 5])).unwrap();
+        let public = store.publish(47000, Some([10, 0, 0, 5]), false).unwrap();
         assert_eq!(public.keys.len(), 1);
         assert!(public.pairing_code.ends_with(":10.0.0.5"));
         let decoded = Pairing::decode(&public.pairing_code).unwrap();

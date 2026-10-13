@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import secrets
@@ -97,7 +98,25 @@ def login_page(error: str = "") -> bytes:
 <button class=primary>Log in</button></form>""")
 
 
-def dashboard(cfg: Config, error: str = "") -> bytes:
+def pairing_code(pub: dict, host: str | None) -> str | None:
+    """The responder's pairing code, pointing at the address this page was
+    reached at when the responder only auto-detected its own address (which
+    can be a container-internal one). An explicitly configured address wins."""
+    code = pub.get("pairing_code")
+    if not code or pub.get("server_ip_configured"):
+        return code
+    hostname = (host or "").rsplit(":", 1)[0]
+    try:
+        ip = ipaddress.IPv4Address(hostname)
+    except ValueError:
+        return code
+    if ip.is_loopback or ip.is_unspecified:
+        return code
+    parts = code.split(":")
+    return ":".join(parts[:4] + [str(ip)])
+
+
+def dashboard(cfg: Config, error: str = "", host: str | None = None) -> bytes:
     st = cfg.store
     pub = st.public()
     parts = ["<header><h1>NetBooty</h1><form method=post action=/logout><button>Log out</button></form></header>"]
@@ -151,14 +170,16 @@ def dashboard(cfg: Config, error: str = "") -> bytes:
 <form method=post action='/request/{r['id']}/dismiss'><button>Dismiss</button></form></div>""")
 
     parts.append("<h2>Pair a PC</h2>")
-    code = pub.get("pairing_code")
+    code = pairing_code(pub, host)
     if code:
         fps = " / ".join(pub.get("fingerprints", []))
         parts.append(f"""<div class=card><p>On the PC, run (or paste the code into <code>sudo netbooty-setup</code>):</p>
 <div class=row><input id=cmd readonly size=60 class=code value="sudo netbooty-setup pair '{esc(code)}'">
 <button onclick="navigator.clipboard.writeText(document.getElementById('cmd').value)">Copy</button>
 <a href=/pairing.txt download=netbooty-pairing.txt>Download</a></div>
-<p class=muted>Key fingerprint: <code>{esc(fps)}</code> — the PC shows the same when pairing.</p></div>""")
+<p class=muted>Key fingerprint: <code>{esc(fps)}</code> — the PC shows the same when pairing.</p>
+<p class=muted>Or let the PC find this server itself: <code>sudo netbooty-setup pair --discover</code>,
+then check that it shows this fingerprint.</p></div>""")
     else:
         parts.append("<p class=err>The responder has not published a key yet. Is it running?</p>")
     return page("NetBooty", "".join(parts))
@@ -230,9 +251,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.logged_in():
             return self.send(200, login_page()) if path == "/login" else self.redirect("/login")
         if path == "/":
-            return self.send(200, dashboard(self.cfg))
+            return self.send(200, dashboard(self.cfg, host=self.headers.get("Host")))
         if path == "/pairing.txt":
-            code = self.cfg.store.public().get("pairing_code", "")
+            code = pairing_code(self.cfg.store.public(), self.headers.get("Host")) or ""
             return self.send(200, (code + "\n").encode(), "text/plain; charset=utf-8")
         return self.send(404, page("Not found", "<p>Not found</p>"))
 
@@ -275,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
                 case _:
                     return self.send(404, page("Not found", "<p>Not found</p>"))
         except StateError as e:
-            return self.send(400, dashboard(self.cfg, str(e)))
+            return self.send(400, dashboard(self.cfg, str(e), self.headers.get("Host")))
         return self.redirect("/")
 
     def api(self, method: str, path: str):
@@ -291,7 +312,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json(200, {
                         "pcs": st.pcs(),
                         "requests": st.pending_requests(),
-                        "pairing": {"code": pub.get("pairing_code"), "fingerprints": pub.get("fingerprints", [])},
+                        "pairing": {"code": pairing_code(pub, self.headers.get("Host")),
+                                    "fingerprints": pub.get("fingerprints", [])},
                     })
                 case ("POST", ["pcs", key, "choice"]):
                     st.set_choice(st.find_pc(key), data.get("target"))

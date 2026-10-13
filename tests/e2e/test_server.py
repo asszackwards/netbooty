@@ -172,3 +172,19 @@ def test_once_is_used_once(scenario, server):
     assert boot(s).has("decision=network target=alpha")
     time.sleep(61)  # past the one-shot's grace period for retries of the same boot
     assert boot(s).has("decision=network target=beta")
+
+
+def test_discovery_offer(server):
+    """`netbooty-setup pair --discover` sends DISCOVER; the responder answers
+    with its pairing code (only public data)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(2)
+    for dest in ("127.0.0.1", "255.255.255.255"):
+        sock.sendto(b"NBTYD1", (dest, server.port))
+        data, _ = sock.recvfrom(1024)
+        assert data.startswith(b"NBTYP1")
+        code = data[6:].decode()
+        assert code.startswith(f"netbooty-pair:1:{server.port}:")
+        assert code == server.code()
+    assert "discovery request" in server.log.read_text()

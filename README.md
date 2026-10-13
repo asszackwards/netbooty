@@ -93,16 +93,23 @@ cp .env.example .env            # set NETBOOTY_PASSWORD
 docker compose up -d
 ```
 
-Open `http://<server>:8470`, log in, and copy the pairing command from *Pair a
-PC*. On the PC:
+Open `http://<server>:8470` and log in. On the PC, either let it find the
+server itself:
 
 ```bash
-sudo netbooty-setup pair 'netbooty-pair:1:…'     # or paste it in `sudo netbooty-setup`
+sudo netbooty-setup pair --discover      # or "Find a NetBooty server" in `sudo netbooty-setup`
 ```
 
-It shows the server's key fingerprint (compare it with the web page),
-reinstalls NetBooty with the server's key, and announces the PC. Approve it
-under *New PCs*, then choose what it boots:
+or copy the command from the web page's *Pair a PC*:
+
+```bash
+sudo netbooty-setup pair 'netbooty-pair:1:…'
+```
+
+Either way it shows the server's key fingerprint: **check that it matches the
+web page** (that check is what stops another machine on the LAN from posing as
+your server). It then reinstalls NetBooty with the server's key and announces
+the PC. Approve it under *New PCs*, then choose what it boots:
 
 - **Boots**: the persistent choice, or *its own default*.
 - **…once**: boot a target on the next boot only, then go back to the choice.
@@ -124,10 +131,14 @@ curl -H "Authorization: Bearer $TOKEN" -d '{"target":null}'      http://server:8
 ```
 
 Notes:
-- The pairing code carries the server's address (auto-detected; set
-  `NETBOOTY_ADVERTISE_IP` in `compose.yaml` if it picks the wrong one), so PCs
-  also ask it directly where broadcast does not reach. Give the server a fixed
-  address (DHCP reservation).
+- PCs find the server by broadcast and also ask its address directly, for
+  networks where broadcast does not reach. `--discover` records the address
+  the server answered from; a copied code uses the address you opened the web
+  page at (or `NETBOOTY_ADVERTISE_IP`, if set in `compose.yaml`). Give the
+  server a fixed address (DHCP reservation).
+- The responder must use host networking (as in `compose.yaml`); it logs a
+  warning if it finds itself on a container network, where broadcasts from
+  PCs cannot reach it.
 - The web port is plain HTTP. Keep it on your LAN or put it behind a reverse
   proxy with TLS.
 - **Key rotation:** `docker compose exec responder /netbooty-server keygen --next`,
