@@ -3,6 +3,13 @@
 //! Install is deliberately staged: it never puts NetBooty first in BootOrder
 //! unless asked (`--first`), and refuses to do so while the signing key is not
 //! enrolled, because shim would then stop every boot at a verification error.
+//!
+//! With shim, NetBooty gets its own copy of the distro's shim and MokManager in
+//! `\EFI\netbooty\` and is installed next to them as shim's default second
+//! stage (`grubx64.efi`). Its boot entry therefore points at a file no other
+//! entry uses: some firmware (seen on AMI Aptio) deletes entries whose device
+//! paths are identical, ignoring their optional data, so chaining through the
+//! distro's own shim with a path argument can cost the distro its boot entry.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,7 +24,13 @@ use crate::{fmt_part, pe};
 
 /// Where NetBooty lives on the ESP.
 pub const NB_DIR: &str = "\\EFI\\netbooty";
+/// NetBooty image when booted directly (own-keys / unsigned).
 pub const NB_REL: &str = "\\EFI\\netbooty\\netbooty.efi";
+
+/// Shim copy layout inside `NB_DIR`.
+fn nb_file(name: &str) -> String {
+    format!("{NB_DIR}\\{name}")
+}
 pub const ENTRY_LABEL: &str = "NetBooty";
 pub const KEY_DIR: &str = "/var/lib/netbooty/keys";
 
@@ -70,6 +83,14 @@ impl Runner {
         let tmp = path.with_extension("efi.new");
         std::fs::write(&tmp, data).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<()> {
+        println!("  remove {}", path.display());
+        if self.dry {
+            return Ok(());
+        }
+        std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))
     }
 
     fn remove_dir(&self, path: &Path) -> Result<()> {
@@ -145,7 +166,80 @@ fn pick_esp(esps: &[Esp], requested: Option<&Path>, want_shim: bool) -> Result<(
 }
 
 pub fn is_netbooty_entry(o: &LoadOption) -> bool {
-    o.description == ENTRY_LABEL || netbooty_cfg::loadopt::launches(o, NB_REL)
+    let in_nb_dir = o
+        .loader_path
+        .to_ascii_lowercase()
+        .replace('/', "\\")
+        .starts_with(&format!("{}\\", NB_DIR.to_ascii_lowercase()));
+    o.description == ENTRY_LABEL || in_nb_dir || netbooty_cfg::loadopt::launches(o, NB_REL)
+}
+
+/// Other entries with the same partition and loader as `o`: firmware that
+/// deduplicates boot entries may delete one of them.
+fn twins<'a>(o: &LoadOption, entries: &'a [(u16, LoadOption)], skip: u16) -> Vec<&'a (u16, LoadOption)> {
+    entries
+        .iter()
+        .filter(|(n, e)| {
+            *n != skip && e.partition == o.partition && e.loader_path.eq_ignore_ascii_case(&o.loader_path)
+        })
+        .collect()
+}
+
+/// The distro shim NetBooty's private copy is taken from.
+pub fn source_shim(mount: &Path, requested: Option<&str>) -> Result<String> {
+    if let Some(s) = requested {
+        return Ok(s.replace('/', "\\"));
+    }
+    let nb_prefix = format!("{}\\", NB_DIR.to_ascii_lowercase());
+    let found: Vec<String> = system::shims(mount)
+        .into_iter()
+        .filter(|s| !s.to_ascii_lowercase().starts_with(&nb_prefix))
+        .collect();
+    match found.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => bail!("no {} on {}; use --shim or --mode", system::SHIM_NAME, mount.display()),
+        many => bail!("several shims on {} ({}); pick one with --shim", mount.display(), many.join(", ")),
+    }
+}
+
+/// Is NetBooty's shim (and MokManager) copy identical to the distro's?
+fn shim_copy_status(mount: &Path) -> Result<(String, bool)> {
+    let src = source_shim(mount, None)?;
+    let src_dir = src.rsplit_once('\\').map_or("", |(d, _)| d).to_string();
+    let same = [system::SHIM_NAME, system::MM_NAME].iter().all(|name| {
+        let a = std::fs::read(system::esp_file(mount, &format!("{src_dir}\\{name}")));
+        let b = std::fs::read(system::esp_file(mount, &nb_file(name)));
+        matches!((a, b), (Ok(a), Ok(b)) if a == b)
+    });
+    Ok((src, same))
+}
+
+/// Re-copy the distro's shim and MokManager next to NetBooty, e.g. after a
+/// distro shim update (an outdated shim can be revoked via SBAT/dbx).
+pub fn refresh_shim(esp: Option<PathBuf>, shim: Option<String>, dry_run: bool) -> Result<()> {
+    if !dry_run && !system::is_root() {
+        bail!("run refresh-shim with sudo (or use --dry-run)");
+    }
+    let r = Runner { dry: dry_run };
+    let esps = system::esps()?;
+    let (_, mount) = pick_esp(&esps, esp.as_deref(), true)?;
+    if !system::esp_file(&mount, &nb_file(system::SHIM_NAME)).exists() {
+        bail!("no NetBooty shim copy on {}; nothing to refresh", mount.display());
+    }
+    let src = source_shim(&mount, shim.as_deref())?;
+    let src_dir = src.rsplit_once('\\').map_or("", |(d, _)| d).to_string();
+    let mut changed = false;
+    for name in [system::SHIM_NAME, system::MM_NAME] {
+        let from = system::esp_file(&mount, &format!("{src_dir}\\{name}"));
+        let to = system::esp_file(&mount, &nb_file(name));
+        let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
+        if std::fs::read(&to).ok().as_deref() != Some(bytes.as_slice()) {
+            r.write(&to, &bytes)?;
+            changed = true;
+        }
+    }
+    println!("{}", if changed { "shim copy updated" } else { "shim copy already up to date" });
+    Ok(())
 }
 
 pub struct InstallOpts {
@@ -201,17 +295,14 @@ pub fn install(
     }
     let (esp, mount) = pick_esp(&esps, opts.esp.as_deref(), mode == Mode::Shim)?;
 
-    let loader = match mode {
-        Mode::Shim => match opts.shim {
-            Some(s) => s.replace('/', "\\"),
-            None => match system::shims(&mount).as_slice() {
-                [one] => one.clone(),
-                many => {
-                    bail!("several shims on {} ({}); pick one with --shim", mount.display(), many.join(", "))
-                }
-            },
-        },
-        _ => NB_REL.to_string(),
+    // Shim mode: the distro shim to copy, and where things go.
+    let src_shim = match mode {
+        Mode::Shim => Some(source_shim(&mount, opts.shim.as_deref())?),
+        _ => None,
+    };
+    let (loader, image_rel) = match mode {
+        Mode::Shim => (nb_file(system::SHIM_NAME), nb_file(system::GRUB_NAME)),
+        _ => (NB_REL.to_string(), NB_REL.to_string()),
     };
 
     let (key, cert, der) = match mode {
@@ -252,17 +343,30 @@ pub fn install(
 
     println!("ESP:          {} ({}) mounted at {}", esp.device, esp.part_uuid, mount.display());
     println!("mode:         {mode:?}; Secure Boot {sb:?}");
-    println!(
-        "loader:       {loader}{}",
-        if mode == Mode::Shim { format!(" -> {NB_REL}") } else { String::new() }
-    );
+    match &src_shim {
+        Some(src) => println!("loader:       {loader} (copy of {src}) -> {image_rel}"),
+        None => println!("loader:       {loader}"),
+    }
     if mode == Mode::Shim {
         println!("MOK:          {mok:?}");
     }
 
-    // Keep the client ID of an existing install.
-    let dest = system::esp_file(&mount, NB_REL);
-    let existing = std::fs::read(&dest).ok().and_then(|b| pe::read_config(&b).ok());
+    // Keep the client ID of an existing install (either layout).
+    let dest = system::esp_file(&mount, &image_rel);
+    let existing = [nb_file(system::GRUB_NAME), NB_REL.to_string()].iter().find_map(|rel| {
+        std::fs::read(system::esp_file(&mount, rel)).ok().and_then(|b| pe::read_config(&b).ok())
+    });
+
+    // Never create an entry that firmware could treat as a duplicate.
+    let entries = store.boot_entries()?;
+    let clash: Vec<String> = entries
+        .iter()
+        .filter(|(_, o)| !is_netbooty_entry(o) && o.loader_path.eq_ignore_ascii_case(&loader))
+        .map(|(n, o)| format!("Boot{n:04X} \"{}\"", o.description))
+        .collect();
+    if !clash.is_empty() {
+        bail!("{} already boot {loader}; NetBooty needs a loader no other entry uses", clash.join(", "));
+    }
     let cfg = build_config(existing.as_ref(), opts.first)?;
     pe::write_config(&mut image, &cfg.encode().map_err(|e| anyhow::anyhow!("invalid config: {e:?}"))?)?;
 
@@ -289,18 +393,32 @@ pub fn install(
         unsigned
     };
     let data = if r.dry { image } else { std::fs::read(&payload)? };
+    if let Some(src) = &src_shim {
+        // Shim and MokManager first, so a half-finished install never has a
+        // NetBooty image without the shim that verifies it.
+        let src_dir = src.rsplit_once('\\').map_or("", |(d, _)| d).to_string();
+        for name in [system::SHIM_NAME, system::MM_NAME] {
+            let from = system::esp_file(&mount, &format!("{src_dir}\\{name}"));
+            let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
+            r.write(&system::esp_file(&mount, &nb_file(name)), &bytes)?;
+        }
+    }
     r.write(&dest, &data)?;
-    let _ = std::fs::remove_dir_all(&work);
+    // Image from the other layout (e.g. the old shim-argument install).
+    for rel in [NB_REL.to_string(), nb_file(system::GRUB_NAME)] {
+        let p = system::esp_file(&mount, &rel);
+        if rel != image_rel && p.exists() {
+            r.remove_file(&p)?;
+        }
+    }
 
     // Boot entry: reuse a matching one, replace stale ones.
-    let entries = store.boot_entries()?;
-    let want_opt = (mode == Mode::Shim).then_some(NB_REL);
     let esp_uuid = esp.part_uuid.clone();
     let matches_wanted = |o: &LoadOption| {
         o.description == ENTRY_LABEL
             && o.loader_path.eq_ignore_ascii_case(&loader)
             && o.partition.is_some_and(|p| fmt_part(&p) == esp_uuid)
-            && o.optional_text().as_deref().map(|t| t.eq_ignore_ascii_case(NB_REL)) == want_opt.map(|_| true)
+            && o.optional_data.is_empty()
     };
     let mut num = entries.iter().find(|(_, o)| matches_wanted(o)).map(|(n, _)| *n);
     for (n, o) in &entries {
@@ -323,10 +441,9 @@ pub fn install(
             "-l",
             &loader,
         ]);
-        if let Some(o) = want_opt {
-            c.args(["-u", o]);
-        }
-        r.cmd(&mut c)?;
+        let created = r.cmd(&mut c);
+        let _ = std::fs::remove_dir_all(&work);
+        created?;
         if !r.dry {
             let after = store.boot_entries()?;
             num = after.iter().find(|(_, o)| matches_wanted(o)).map(|(n, _)| *n);
@@ -336,9 +453,23 @@ pub fn install(
         }
     }
 
+    let _ = std::fs::remove_dir_all(&work);
+
     if opts.first {
         let order = store.boot_order();
         let n = num.unwrap_or(0xFFFF);
+        if !r.dry {
+            let now = store.boot_entries()?;
+            if let Some((_, mine)) = now.iter().find(|(x, _)| *x == n) {
+                let t = twins(mine, &now, n);
+                if !t.is_empty() {
+                    bail!(
+                        "refusing --first: Boot{} share NetBooty's boot path and firmware may delete one of them",
+                        t.iter().map(|(x, _)| format!("{x:04X}")).collect::<Vec<_>>().join(", Boot")
+                    );
+                }
+            }
+        }
         if order.first() != Some(&n) {
             let new: Vec<String> = std::iter::once(n)
                 .chain(order.into_iter().filter(|&x| x != n))
@@ -439,7 +570,22 @@ pub fn doctor() -> Result<()> {
             for s in system::shims(mp) {
                 println!("    shim: {s}");
             }
-            let nb = system::esp_file(mp, NB_REL);
+            let copy = system::esp_file(mp, &nb_file(system::SHIM_NAME));
+            if copy.exists() {
+                match shim_copy_status(mp) {
+                    Ok((src, true)) => println!("    shim copy: {} (same as {src})", copy.display()),
+                    Ok((src, false)) => println!(
+                        "    shim copy: {} DIFFERS from {src}; run `sudo netbooty-setup refresh-shim`",
+                        copy.display()
+                    ),
+                    Err(e) => println!("    shim copy: {} ({e})", copy.display()),
+                }
+            }
+            let nb = [nb_file(system::GRUB_NAME), NB_REL.to_string()]
+                .iter()
+                .map(|rel| system::esp_file(mp, rel))
+                .find(|p| p.exists())
+                .unwrap_or_default();
             if let Ok(b) = std::fs::read(&nb) {
                 println!("    NetBooty installed: {}", nb.display());
                 match pe::read_config(&b) {
@@ -469,4 +615,37 @@ pub fn doctor() -> Result<()> {
         Err(_) => println!("  none yet (`sudo netbooty-setup keygen` creates one)"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netbooty_cfg::loadopt::build;
+
+    fn entry(desc: &str, part: [u8; 16], path: &str, opt: &[u8]) -> LoadOption {
+        let mut fpl = build::hd_node(1, 2048, 1 << 20, 2, part);
+        fpl.extend(build::file_node(path));
+        fpl.extend(build::end_node());
+        LoadOption::parse(&build::load_option(1, desc, &fpl, opt)).unwrap()
+    }
+
+    #[test]
+    fn netbooty_entries_and_twins() {
+        let ubuntu = entry("ubuntu", [1; 16], "\\EFI\\ubuntu\\shimx64.efi", b"");
+        let copy = entry("NetBooty", [1; 16], "\\EFI\\netbooty\\shimx64.efi", b"");
+        let legacy_opt: Vec<u8> =
+            "\\EFI\\netbooty\\netbooty.efi".encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        let legacy = entry("x", [1; 16], "\\EFI\\ubuntu\\shimx64.efi", &legacy_opt);
+        assert!(!is_netbooty_entry(&ubuntu));
+        assert!(is_netbooty_entry(&copy));
+        assert!(is_netbooty_entry(&legacy));
+
+        // The old layout shared Ubuntu's boot path: the dedupe hazard.
+        let all = vec![(2, ubuntu.clone()), (1, legacy.clone()), (4, copy.clone())];
+        assert_eq!(twins(&legacy, &all, 1).len(), 1);
+        assert!(twins(&copy, &all, 4).is_empty());
+        // Same path on another disk is not a twin.
+        let other_disk = entry("ubuntu", [2; 16], "\\EFI\\netbooty\\shimx64.efi", b"");
+        assert!(twins(&copy, &[(4, copy.clone()), (7, other_disk)], 4).is_empty());
+    }
 }

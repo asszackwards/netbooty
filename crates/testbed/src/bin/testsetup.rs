@@ -3,7 +3,8 @@
 //!
 //!   entry <hex> <description> <path> [fs=<n>] [opt=<text>]
 //!                                                short-form HD()/File() entry; `opt`
-//!                                                is stored as UCS-2 optional data (shim)
+//!                                                is stored as UCS-2 optional data (shim);
+//!                                                `optraw` omits the NUL terminator
 //!   order <hex> <hex> ...                        BootOrder
 //!   bootnext <hex>                               native BootNext
 //!   nbnext <name>                                NetBootyNext
@@ -86,6 +87,11 @@ fn run(line: &str) {
                 .iter()
                 .find_map(|w| w.strip_prefix("opt="))
                 .map(|o| o.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect())
+                .or_else(|| {
+                    // Unterminated UCS-2, as `efibootmgr -u` writes it.
+                    let o = rest.iter().find_map(|w| w.strip_prefix("optraw="))?;
+                    Some(o.encode_utf16().flat_map(u16::to_le_bytes).collect())
+                })
                 .unwrap_or_default();
             let opt = build::load_option(1, &desc.replace('_', " "), &fpl, &data);
             runtime::set_variable(&boot_name(hex(num)), &GLOBAL, attrs(), &opt).unwrap();

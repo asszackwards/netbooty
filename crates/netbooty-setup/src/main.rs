@@ -104,7 +104,7 @@ enum Cmd {
         esp: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "auto")]
         mode: install::Mode,
-        /// ESP-relative shim to chain through, e.g. \EFI\ubuntu\shimx64.efi (default: auto-detect).
+        /// ESP-relative distro shim to copy, e.g. \EFI\ubuntu\shimx64.efi (default: auto-detect).
         #[arg(long)]
         shim: Option<String>,
         /// Signing key and certificate (default: the keygen key for shim mode).
@@ -116,6 +116,16 @@ enum Cmd {
         #[arg(long)]
         first: bool,
         /// Show what would be done without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Update NetBooty's copy of shim and MokManager from the distro's shim.
+    RefreshShim {
+        #[arg(long)]
+        esp: Option<PathBuf>,
+        /// ESP-relative distro shim to copy (default: auto-detect).
+        #[arg(long)]
+        shim: Option<String>,
         #[arg(long)]
         dry_run: bool,
     },
@@ -355,6 +365,7 @@ fn main() -> Result<()> {
                 Ok(c)
             })?;
         }
+        Cmd::RefreshShim { esp, shim, dry_run } => install::refresh_shim(esp, shim, dry_run)?,
         Cmd::Uninstall { esp, dry_run } => install::uninstall(esp, dry_run)?,
         Cmd::Doctor => install::doctor()?,
     }

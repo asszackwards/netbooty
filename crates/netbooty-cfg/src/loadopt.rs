@@ -163,11 +163,19 @@ fn contains_ignore_case(hay: &str, needle: &str) -> bool {
 }
 
 /// Does this entry start `image_path` (an ESP-relative path such as
-/// `\\EFI\\netbooty\\netbooty.efi`), directly or as shim's second stage?
+/// `\\EFI\\netbooty\\grubx64.efi`)? Either directly, as shim's second stage
+/// via a path argument, or through a loader in the same directory (a private
+/// shim copy whose default second stage is the image).
 pub fn launches(opt: &LoadOption, image_path: &str) -> bool {
     let want = norm_path(image_path);
-    !want.is_empty()
-        && (norm_path(&opt.loader_path) == want || opt.optional_text().is_some_and(|t| norm_path(&t) == want))
+    if want.is_empty() {
+        return false;
+    }
+    let loader = norm_path(&opt.loader_path);
+    let dir = |p: &str| p.rsplit_once('\\').map(|(d, _)| String::from(d));
+    loader == want
+        || opt.optional_text().is_some_and(|t| norm_path(&t) == want)
+        || (dir(&want).is_some() && dir(&loader) == dir(&want))
 }
 
 /// Does this `Boot####` entry satisfy every enabled match rule of `t`?
@@ -430,6 +438,10 @@ mod tests {
         let ubuntu = entry(1, "ubuntu", Some(GUID_A), "\\EFI\\ubuntu\\shimx64.efi");
         assert!(!launches(&ubuntu, "\\EFI\\netbooty\\netbooty.efi"));
         assert!(!launches(&ubuntu, ""));
+        // Private shim copy next to NetBooty (installed as grubx64.efi).
+        let copy = entry(1, "NetBooty", Some(GUID_A), "\\EFI\\netbooty\\shimx64.efi");
+        assert!(launches(&copy, "\\EFI\\netbooty\\grubx64.efi"));
+        assert!(!launches(&ubuntu, "\\EFI\\netbooty\\grubx64.efi"));
     }
 
     #[test]

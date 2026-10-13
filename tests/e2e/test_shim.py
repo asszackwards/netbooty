@@ -1,5 +1,10 @@
-"""Booting NetBooty as shim's second stage, using the distro shim installed on
-this machine (Microsoft-signed), with and without Secure Boot enforced."""
+"""Booting NetBooty behind the distro shim installed on this machine
+(Microsoft-signed), with and without Secure Boot enforced.
+
+Layout matches `netbooty-setup install` in shim mode: a private copy of shim
+and MokManager in \\EFI\\netbooty\\ with NetBooty as shim's default second stage
+(grubx64.efi), so NetBooty's entry never shares a boot path with the distro's
+entry (AMI firmware deletes such duplicates)."""
 
 import shutil
 from pathlib import Path
@@ -18,13 +23,12 @@ pytestmark = pytest.mark.skipif(
     reason="needs a distro shim in /boot/efi/EFI/ubuntu, Secure Boot OVMF and sbsign",
 )
 
-NB = "\\EFI\\netbooty\\netbooty.efi"
-
-# 0050 is a stale duplicate NetBooty entry with a lower number: it shares
-# loader and partition with the `linux` target and must never be chosen.
-SCRIPT = f"""\
-entry 0050 NetBooty_old \\EFI\\ubuntu\\shimx64.efi opt={NB}
-entry 0100 NetBooty \\EFI\\ubuntu\\shimx64.efi opt={NB}
+# 0050 is a leftover entry from the old install layout (Ubuntu's shim with a
+# path argument): it shares loader and partition with the `linux` target and
+# must never be chosen as that target.
+SCRIPT = """\
+entry 0050 NetBooty_old \\EFI\\ubuntu\\shimx64.efi opt=\\EFI\\netbooty\\grubx64.efi
+entry 0100 NetBooty \\EFI\\netbooty\\shimx64.efi
 entry 0101 ubuntu \\EFI\\ubuntu\\shimx64.efi
 order 0100 0101
 """
@@ -49,7 +53,9 @@ def boot_via_shim(tmp_path, *, secure_boot, sign_netbooty, key=None, enroll=Fals
         "\\EFI\\ubuntu\\shimx64.efi": SHIM,
         "\\EFI\\ubuntu\\mmx64.efi": MM,
         "\\EFI\\ubuntu\\grubx64.efi": grub,
-        NB: nb,
+        "\\EFI\\netbooty\\shimx64.efi": SHIM,
+        "\\EFI\\netbooty\\mmx64.efi": MM,
+        "\\EFI\\netbooty\\grubx64.efi": nb,
     })
     if key:
         disk.files["\\test.der"] = key[2]
@@ -59,7 +65,7 @@ def boot_via_shim(tmp_path, *, secure_boot, sign_netbooty, key=None, enroll=Fals
     return m.boot(**boot_kw)
 
 
-def test_shim_chain_without_secure_boot(tmp_path):
+def test_private_shim_copy_without_secure_boot(tmp_path):
     r = boot_via_shim(tmp_path, secure_boot=False, sign_netbooty=False)
     assert r.has("NETBOOTY: target=linux -> Boot0101")
     assert r.target() == "ubuntu"
@@ -73,7 +79,7 @@ def test_signed_with_enrolled_mok_under_secure_boot(tmp_path, test_key):
 
 def test_unenrolled_netbooty_falls_through(tmp_path, test_key):
     # Signed, but its key is not in MokList: shim refuses it, waits at the
-    # error, MokManager times out, and the firmware boots the next entry.
+    # error, and the firmware then boots the next entry.
     r = boot_via_shim(tmp_path, secure_boot=True, sign_netbooty=False, key=test_key, enroll=True,
                       keys=[("Verification failed", "\r")] * 4, timeout=120)
     assert r.has("Verification failed")

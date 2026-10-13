@@ -12,8 +12,17 @@ pub const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 
 #[cfg(target_arch = "x86_64")]
 pub const SHIM_NAME: &str = "shimx64.efi";
+#[cfg(target_arch = "x86_64")]
+pub const MM_NAME: &str = "mmx64.efi";
+/// The second stage shim loads by default from its own directory.
+#[cfg(target_arch = "x86_64")]
+pub const GRUB_NAME: &str = "grubx64.efi";
 #[cfg(target_arch = "aarch64")]
 pub const SHIM_NAME: &str = "shimaa64.efi";
+#[cfg(target_arch = "aarch64")]
+pub const MM_NAME: &str = "mmaa64.efi";
+#[cfg(target_arch = "aarch64")]
+pub const GRUB_NAME: &str = "grubaa64.efi";
 
 #[derive(Clone, Debug)]
 pub struct Esp {
