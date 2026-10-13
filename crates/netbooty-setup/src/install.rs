@@ -109,6 +109,50 @@ impl Runner {
         std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
     }
 
+    /// Replace several files that only work together (shim + MokManager):
+    /// all are fully written and flushed under temporary names first, then
+    /// renamed back to back, so an interruption cannot leave a mix of old and
+    /// new files except in the instant between the renames (and `maintain`
+    /// repairs that). Only files whose content differs are touched; returns
+    /// whether anything changed.
+    fn update_group(&self, files: &[(PathBuf, Vec<u8>)]) -> Result<bool> {
+        let changed: Vec<&(PathBuf, Vec<u8>)> =
+            files.iter().filter(|(p, d)| std::fs::read(p).ok().as_deref() != Some(d.as_slice())).collect();
+        if changed.is_empty() {
+            return Ok(false);
+        }
+        let tmp_of = |p: &Path| {
+            let mut t = p.as_os_str().to_owned();
+            t.push(".new");
+            PathBuf::from(t)
+        };
+        for (path, data) in &changed {
+            println!("  write {}", path.display());
+            if self.dry {
+                continue;
+            }
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
+            let tmp = tmp_of(path);
+            let mut f = std::fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+            std::io::Write::write_all(&mut f, data).with_context(|| format!("writing {}", tmp.display()))?;
+            f.sync_all().with_context(|| format!("flushing {}", tmp.display()))?;
+        }
+        if self.dry {
+            return Ok(true);
+        }
+        for (path, _) in &changed {
+            std::fs::rename(tmp_of(path), path).with_context(|| format!("replacing {}", path.display()))?;
+        }
+        if let Some(dir) = changed[0].0.parent()
+            && let Ok(d) = std::fs::File::open(dir)
+        {
+            let _ = d.sync_all();
+        }
+        Ok(true)
+    }
+
     /// `write`, but only when the content differs; returns whether it wrote.
     fn update(&self, path: &Path, data: &[u8]) -> Result<bool> {
         if std::fs::read(path).ok().as_deref() == Some(data) {
@@ -265,15 +309,16 @@ fn shim_copy_status(mount: &Path, shim: Option<&str>) -> Result<(String, bool)> 
 /// Copy the distro's shim and MokManager next to NetBooty if they differ.
 /// An outdated shim can be revoked (SBAT/dbx), so the copy must follow
 /// distro updates.
+/// They are released as a pair, so both are replaced together.
 fn sync_shim(r: &Runner, mount: &Path, src: &str) -> Result<bool> {
     let src_dir = dir_of(src);
-    let mut changed = false;
+    let mut files = Vec::new();
     for name in [system::SHIM_NAME, system::MM_NAME] {
         let from = system::esp_file(mount, &format!("{src_dir}\\{name}"));
         let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
-        changed |= r.update(&system::esp_file(mount, &nb_file(name)), &bytes)?;
+        files.push((system::esp_file(mount, &nb_file(name)), bytes));
     }
-    Ok(changed)
+    r.update_group(&files)
 }
 
 pub fn refresh_shim(esp: Option<PathBuf>, shim: Option<String>, dry_run: bool) -> Result<()> {
@@ -887,6 +932,39 @@ mod tests {
         fpl.extend(build::file_node(path));
         fpl.extend(build::end_node());
         LoadOption::parse(&build::load_option(1, desc, &fpl, opt)).unwrap()
+    }
+
+    #[test]
+    fn shim_and_mokmanager_are_replaced_together() {
+        let esp = std::env::temp_dir().join(format!("nb-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&esp);
+        let src = esp.join("EFI/ubuntu");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join(system::SHIM_NAME), b"shim v1").unwrap();
+        std::fs::write(src.join(system::MM_NAME), b"mm v1").unwrap();
+        let r = Runner { dry: false };
+        let shim_rel = format!("\\EFI\\ubuntu\\{}", system::SHIM_NAME);
+        let copy = |name: &str| std::fs::read(esp.join("EFI/netbooty").join(name)).unwrap();
+
+        assert!(sync_shim(&r, &esp, &shim_rel).unwrap());
+        assert_eq!(copy(system::SHIM_NAME), b"shim v1");
+        assert_eq!(copy(system::MM_NAME), b"mm v1");
+        assert!(!sync_shim(&r, &esp, &shim_rel).unwrap(), "unchanged pair is left alone");
+
+        // A distro update replaces both; a half-updated copy is repaired.
+        std::fs::write(src.join(system::SHIM_NAME), b"shim v2").unwrap();
+        std::fs::write(src.join(system::MM_NAME), b"mm v2").unwrap();
+        std::fs::write(esp.join("EFI/netbooty").join(system::MM_NAME), b"mm v2").unwrap();
+        assert!(sync_shim(&r, &esp, &shim_rel).unwrap());
+        assert_eq!(copy(system::SHIM_NAME), b"shim v2");
+        assert_eq!(copy(system::MM_NAME), b"mm v2");
+        let leftovers: Vec<_> = std::fs::read_dir(esp.join("EFI/netbooty"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".new"))
+            .collect();
+        assert!(leftovers.is_empty());
+        let _ = std::fs::remove_dir_all(&esp);
     }
 
     #[test]
