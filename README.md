@@ -112,6 +112,12 @@ cp .env.example .env            # set NETBOOTY_PASSWORD
 docker compose up -d
 ```
 
+To build on another machine instead, run `scripts/push-server.sh` there (after
+`docker login ghcr.io` with a token that has `write:packages`); it pushes
+`ghcr.io/asszackwards/netbooty-server:latest`. On the server, update with
+`docker compose pull && docker compose up -d`. A private package needs
+`docker login ghcr.io` (with `read:packages`) on the server too.
+
 Open `http://<server>:8470` and log in. On the PC, either let it find the
 server itself:
 

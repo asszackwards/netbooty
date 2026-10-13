@@ -5,7 +5,8 @@ services:
     build:
       context: ..
       dockerfile: server/Dockerfile
-    image: netbooty-server
+    # Pulled if present (scripts/push-server.sh publishes it), otherwise built.
+    image: ghcr.io/asszackwards/netbooty-server:latest
     # Host networking: PCs find the server by broadcast (Docker's port
     # publishing does not forward broadcasts), Wake-on-LAN packets must reach
     # the LAN, and the web app learns PCs' MAC addresses from the host's ARP
