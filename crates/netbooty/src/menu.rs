@@ -23,17 +23,17 @@ const HIGHLIGHT: (Color, Color) = (Color::Black, Color::LightGray);
 const DIM: Color = Color::DarkGray;
 
 const LOGO: [&str; 8] = [
-    r#"          ((o))"#,
-    r#"            |"#,
-    r#"    .-"""-. | .-"""-."#,
-    r#"   /       \|/       \"#,
-    r#"  |         |         |"#,
-    r#"  |         |         |"#,
-    r#"   \        |        /"#,
-    r#"    '-.___.-'-.___.-'"#,
+    r#"        ((o))        "#,
+    r#"          |          "#,
+    r#"  .-"""-. | .-"""-.  "#,
+    r#" /       \|/       \ "#,
+    r#"|         |         |"#,
+    r#"|         |         |"#,
+    r#" \        |        / "#,
+    r#"  '-.___.-'-.___.-'  "#,
 ];
 /// Column of the mast (`|`) in `LOGO`.
-const LOGO_MAST: usize = 12;
+const LOGO_MAST: usize = 10;
 
 pub struct Item<'a> {
     pub name: &'a str,
