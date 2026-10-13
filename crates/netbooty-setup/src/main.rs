@@ -62,6 +62,52 @@ struct ConfigArgs {
     /// Directory with efivarfs-style files (default /sys/firmware/efi/efivars).
     #[arg(long)]
     efivars: Option<PathBuf>,
+    #[command(flatten)]
+    net: NetArgs,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
+/// Network step settings; also applied on top of saved settings.
+#[derive(Args)]
+struct NetArgs {
+    /// Ask a boot server on the LAN (default: on).
+    #[arg(long, value_enum)]
+    network: Option<OnOff>,
+    /// Server IPv4 address to ask directly, besides broadcasting (`none` to clear).
+    #[arg(long)]
+    net_server: Option<String>,
+    #[arg(long)]
+    net_port: Option<u16>,
+    /// How long to wait for a network address (DHCP), in ms; the server then gets 1.5 s more.
+    #[arg(long)]
+    net_timeout: Option<u16>,
+}
+
+impl NetArgs {
+    fn apply(&self, n: &mut settings::NetworkSettings) -> Result<()> {
+        if let Some(v) = self.network {
+            n.enabled = matches!(v, OnOff::On);
+        }
+        if let Some(s) = &self.net_server {
+            n.server = if s == "none" {
+                None
+            } else {
+                Some(s.parse().with_context(|| format!("bad IPv4 address {s:?}"))?)
+            };
+        }
+        if let Some(p) = self.net_port {
+            n.port = p;
+        }
+        if let Some(t) = self.net_timeout {
+            n.timeout_ms = t.max(500);
+        }
+        Ok(())
+    }
 }
 
 impl ConfigArgs {
@@ -103,6 +149,11 @@ impl ConfigArgs {
             key: None,
             cert: None,
             first: false,
+            network: {
+                let mut n = settings::NetworkSettings::default();
+                self.net.apply(&mut n)?;
+                n
+            },
         })
     }
 }
@@ -215,7 +266,9 @@ fn main() -> Result<()> {
                 (s.esp, s.shim, s.key, s.cert) = (esp, shim, key, cert);
                 s
             } else {
-                saved_settings()?
+                let mut s = saved_settings()?;
+                cfg.net.apply(&mut s.network)?;
+                s
             };
             s.first |= first;
             install::install(&s, install::InstallOpts { image, dry_run, interactive })?;

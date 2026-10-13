@@ -745,6 +745,18 @@ pub fn doctor() -> Result<()> {
     if let Some(t) = store.pending_next() {
         println!("  NetBootyNext:  {t} (pending one-shot request)");
     }
+    if let Some(n) = store.net_status() {
+        println!("  Last network:  {n}");
+    }
+    // AMI Aptio keeps its "Network Stack" setup option here; the first byte is
+    // the switch. Purely informational.
+    let ami = store.dir().join("NetworkStackVar-d1405d16-7afc-4695-bb12-41459d3695a2");
+    if let Some(&enabled) = std::fs::read(ami).ok().as_ref().and_then(|d| d.get(4)) {
+        println!(
+            "  Net. stack:    {} in firmware setup (AMI)",
+            if enabled != 0 { "enabled" } else { "DISABLED: enable \"Network Stack\"" }
+        );
+    }
 
     println!("\n== Boot entries");
     for (n, o) in &entries {

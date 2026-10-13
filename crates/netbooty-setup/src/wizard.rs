@@ -242,6 +242,7 @@ fn legacy_settings(store: &Store, entry: Option<u16>) -> Option<Settings> {
         key: None,
         cert: None,
         first: entry.is_some() && store.boot_order().first() == entry.as_ref(),
+        network: Default::default(),
     })
 }
 
@@ -398,6 +399,7 @@ fn configure(store: &Store, previous: Option<&Settings>) -> Result<bool> {
         key: previous.and_then(|p| p.key.clone()),
         cert: previous.and_then(|p| p.cert.clone()),
         first: previous.is_some_and(|p| p.first),
+        network: previous.map(|p| p.network.clone()).unwrap_or_default(),
     };
 
     println!("\nSettings to install (saved in {SETTINGS_PATH}):\n{}", s.to_toml()?);

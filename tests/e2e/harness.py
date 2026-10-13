@@ -101,7 +101,7 @@ class Machine:
 
     def boot(self, timeout: float = 60, keys: list[tuple[str, str]] | None = None,
              extra: list[str] | None = None, attach: list[Disk] | None = None,
-             enforce: bool | None = None) -> Result:
+             enforce: bool | None = None, nic: str = "none") -> Result:
         """Boot until the VM powers off. `keys` is a list of (wait_for, send):
         once `wait_for` appears on the console, `send` is typed over serial."""
         # The non-SB firmware build never verifies images, even with keys
@@ -112,7 +112,7 @@ class Machine:
             "-display", "none", "-monitor", "none", "-serial", "stdio",
             "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE_SB if sb else OVMF_CODE}",
             "-drive", f"if=pflash,format=raw,file={self.vars}",
-            "-nic", "none",
+            "-nic", nic,
         ]
         if sb:
             args += ["-global", "driver=cfi.pflash01,property=secure,value=on"]

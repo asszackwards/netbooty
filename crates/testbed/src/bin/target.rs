@@ -50,7 +50,13 @@ fn main() -> Status {
         })
         .unwrap_or_default();
 
+    let status_name = CString16::try_from(netbooty_cfg::VAR_NET_STATUS).unwrap();
+    let net_status = runtime::get_variable_boxed(&status_name, &nb_vendor)
+        .map(|(d, _)| alloc::string::String::from_utf8_lossy(&d).into_owned())
+        .unwrap_or_default();
+
     println!("TARGET {desc}");
+    println!("TESTBED: NetBootyNetStatus={net_status}");
     println!(
         "TESTBED: BootCurrent={current:04X?} BootNext={:04X?} NetBootyNext={nb_next} BootOrder={order}",
         u16_var(cstr16!("BootNext"))

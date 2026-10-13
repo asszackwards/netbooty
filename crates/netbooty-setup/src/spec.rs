@@ -225,6 +225,14 @@ pub fn print_config(c: &Config) {
         "reset:         {:?}; fallback {:?}; reassert BootOrder {}",
         c.reset, c.fallback, c.reassert_bootorder
     );
+    if c.network {
+        let server = c.server_ip.map_or("broadcast only".into(), |ip| {
+            format!("broadcast + {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+        });
+        println!("network:       port {}, {server}, {} ms, {} retries", c.port, c.net_timeout_ms, c.retries);
+    } else {
+        println!("network:       off");
+    }
     for t in &c.targets {
         let mut rules = Vec::new();
         if t.matching.path {
@@ -268,6 +276,11 @@ pub fn build_config(s: &Settings, existing: Option<&Config>, efivars: &Store) ->
             FallbackArg::Chainload => Fallback::Chainload,
         },
         reassert_bootorder: !s.no_reassert,
+        network: s.network.enabled,
+        port: s.network.port,
+        server_ip: s.network.server.map(|ip| ip.octets()),
+        net_timeout_ms: s.network.timeout_ms,
+        retries: s.network.retries,
         ..Config::default()
     };
     cfg.default = match s.default.as_str() {

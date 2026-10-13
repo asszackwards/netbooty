@@ -49,6 +49,13 @@ impl Store {
         self.global_u16("BootNext")
     }
 
+    /// What NetBooty's network step reported on the last boot that ran it.
+    pub fn net_status(&self) -> Option<String> {
+        let data =
+            std::fs::read(self.dir.join(format!("{}-{VENDOR_GUID}", netbooty_cfg::VAR_NET_STATUS))).ok()?;
+        Some(String::from_utf8_lossy(data.get(4..)?).into_owned())
+    }
+
     /// Target name of a pending NetBootyNext request.
     pub fn pending_next(&self) -> Option<String> {
         let data = std::fs::read(self.next_path()).ok()?;

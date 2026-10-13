@@ -7,6 +7,7 @@ extern crate alloc;
 
 pub mod config;
 pub mod loadopt;
+pub mod proto;
 
 /// Vendor GUID for NetBooty's own UEFI variables.
 pub const VENDOR_GUID: &str = "6adaeca3-9d97-4b60-90a8-a9f2d55969e1";
@@ -18,6 +19,8 @@ pub const VENDOR_GUID_BYTES: [u8; 16] =
 pub const VAR_NEXT: &str = "NetBootyNext";
 /// Reset-loop guard: timestamp written just before NetBooty resets.
 pub const VAR_STAMP: &str = "NetBootyStamp";
+/// Outcome of the last network step (ASCII), readable from the OS.
+pub const VAR_NET_STATUS: &str = "NetBootyNetStatus";
 
 /// Seconds within which re-entering NetBooty after it set BootNext means the
 /// firmware did not honor BootNext.

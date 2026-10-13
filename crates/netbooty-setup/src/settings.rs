@@ -42,6 +42,56 @@ fn default_timeout() -> u16 {
     10
 }
 
+fn yes() -> bool {
+    true
+}
+
+fn default_port() -> u16 {
+    netbooty_cfg::config::DEFAULT_PORT
+}
+
+/// Generous on purpose: a slow link can make the firmware's first DHCP
+/// request get lost, and its retry only goes out ~4 s later. The wait runs
+/// during the menu countdown, so it normally costs nothing.
+fn default_net_timeout() -> u16 {
+    10_000
+}
+
+fn default_retries() -> u8 {
+    2
+}
+
+/// Asking a boot server on the LAN. On by default: it is the point of NetBooty.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct NetworkSettings {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    /// Also ask this server directly (unicast) besides broadcasting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<std::net::Ipv4Addr>,
+    /// How long to wait for a network address (DHCP), in milliseconds. The
+    /// server then gets another 1.5 s to answer.
+    #[serde(default = "default_net_timeout")]
+    pub timeout_ms: u16,
+    #[serde(default = "default_retries")]
+    pub retries: u8,
+}
+
+impl Default for NetworkSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_port(),
+            server: None,
+            timeout_ms: default_net_timeout(),
+            retries: default_retries(),
+        }
+    }
+}
+
 /// Everything needed to (re)build and install NetBooty on this machine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -71,6 +121,8 @@ pub struct Settings {
     /// NetBooty is the default boot entry (first in BootOrder).
     #[serde(default)]
     pub first: bool,
+    #[serde(default)]
+    pub network: NetworkSettings,
 }
 
 impl Settings {
@@ -174,6 +226,7 @@ mod tests {
             key: None,
             cert: None,
             first: true,
+            network: NetworkSettings::default(),
         }
     }
 
@@ -185,6 +238,16 @@ mod tests {
         assert!(text.contains("mode = \"shim\""));
         assert!(!text.contains("client-id"));
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn network_defaults_on_for_older_settings() {
+        let mut text = sample().to_toml().unwrap();
+        let cut = text.find("[network]").unwrap();
+        text.truncate(cut);
+        let s: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(s.network, NetworkSettings::default());
+        assert!(s.network.enabled);
     }
 
     #[test]

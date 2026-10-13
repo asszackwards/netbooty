@@ -11,7 +11,7 @@ keeps its PCR7 binding, for example).
   (e.g. sbctl), or Secure Boot off
 - OS-side one-shot requests ("boot Windows next") from Linux and Windows
 - Keeps itself first in the boot order after OS updates
-- Remote selection over the LAN (signed UDP) is in progress
+- Remote selection over the LAN (signed UDP): networking works, choosing the OS remotely is in progress
 
 ## Quick start (Linux)
 
@@ -56,6 +56,29 @@ healthy (see [Maintenance](#maintenance)).
 ↑/↓ move, Enter boots the highlighted entry, numbers and the shown letters boot
 directly. *Automatic* (the first row, chosen when the countdown ends) boots a
 pending OS request, otherwise the default.
+
+### Network
+
+On every boot NetBooty also asks the LAN for a boot server, using the
+firmware's own network stack (DHCP, then a UDP broadcast on port 47000). It runs
+during the menu countdown, so it normally adds no boot time, and the menu shows
+its progress on the *Network:* line. **Choosing the OS remotely is not finished
+yet:** for now NetBooty only reports whether a server answered and never changes
+what it boots because of it.
+
+- Enable the firmware's network stack in its setup (often *Network Stack* or
+  *UEFI Network Stack*; PXE itself can stay off).
+- `sudo netbooty-setup doctor` shows the last result under *Last network*.
+  `no network stack` with "network card found…" means the stack is disabled
+  in firmware setup, or the firmware lacks a random number generator (newer
+  EDK2-based firmware won't start networking without one).
+- To check that a server would be reached, run the stand-in responder on
+  another machine on the LAN (`python3 tests/e2e/echo_responder.py`, UDP 47000
+  must be allowed through its firewall). The *Network:* line then shows
+  `reply from …`.
+- Settings: `--network off`, `--net-timeout <ms>` (time to get an address,
+  default 10000; the wait overlaps the menu countdown), `--net-server <ip>` (also ask this host directly), `--net-port`.
+  Pass them to `sudo netbooty-setup install`.
 
 ## Everyday use
 
@@ -130,4 +153,4 @@ cd tests/e2e && python3 -m pytest -q       # QEMU/OVMF boot scenarios (needs qem
 
 The QEMU suite boots NetBooty against real GPT disk images, including two-disk
 layouts, the distro shim with Secure Boot enforced, and simulated firmware that
-ignores `BootNext`. See `design.md` for the design and the network protocol.
+ignores `BootNext`.

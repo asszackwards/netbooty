@@ -22,6 +22,17 @@ const BG: Color = Color::Black;
 const HIGHLIGHT: (Color, Color) = (Color::Black, Color::LightGray);
 const DIM: Color = Color::DarkGray;
 
+const LOGO: [&str; 8] = [
+    r#"          ((o))"#,
+    r#"            |"#,
+    r#"    .-"""-. | .-"""-."#,
+    r#"   /       \|/       \"#,
+    r#"  |         |         |"#,
+    r#"  |         |         |"#,
+    r#"   \        |        /"#,
+    r#"    '-.___.-'-.___.-'"#,
+];
+
 pub struct Item<'a> {
     pub name: &'a str,
     pub hotkey: Option<char>,
@@ -191,6 +202,19 @@ impl Menu<'_> {
         self.scr.line(self.help_row() + 5, text);
     }
 
+    fn network(&self, text: &str) {
+        self.scr.line(self.help_row() + 7, &format!("Network: {text}"));
+    }
+
+    /// Logo above the title, starting at row 1.
+    fn draw_logo(&self) {
+        let w = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let left = self.scr.cols.saturating_sub(w) / 2;
+        for (i, l) in LOGO.iter().enumerate() {
+            self.scr.at(left, 1 + i, FG, BG, l);
+        }
+    }
+
     fn movable(&self, i: usize) -> bool {
         i == 0 || self.items[i - 1].available
     }
@@ -208,13 +232,15 @@ impl Menu<'_> {
 }
 
 /// Run the menu step. Returns `Auto` when the menu is not requested or the
-/// countdown expires.
+/// countdown expires. `tick` is called every few milliseconds (to drive the
+/// network query) and returns new network status text to show.
 pub fn run(
     mode: MenuMode,
     timeout_s: u16,
     items: &[Item],
     pending: Option<&str>,
     auto_hint: Option<&str>,
+    tick: &mut dyn FnMut() -> Option<String>,
 ) -> Outcome {
     let triggered = match mode {
         MenuMode::Always => true,
@@ -227,6 +253,7 @@ pub fn run(
                 if waited >= HOLD_WINDOW_MS {
                     break false;
                 }
+                let _ = tick();
                 boot::stall(TICK);
                 waited += TICK.as_millis() as u32;
             }
@@ -240,7 +267,9 @@ pub fn run(
 
     let scr = Screen::open();
     let width = scr.cols.saturating_sub(4).clamp(20, 78);
-    let lay = Layout { left: (scr.cols.saturating_sub(width)) / 2, width, top: 3 };
+    // The logo goes above the title only if the network line still fits below.
+    let logo_h = if 3 + LOGO.len() + items.len() + 1 + 10 < scr.rows { LOGO.len() } else { 0 };
+    let lay = Layout { left: (scr.cols.saturating_sub(width)) / 2, width, top: 3 + logo_h };
     let auto_label = match (pending, auto_hint) {
         (Some(p), _) => format!("Automatic (OS requested {p})"),
         (None, Some(h)) => format!("Automatic ({h})"),
@@ -248,7 +277,10 @@ pub fn run(
     };
     let menu = Menu { scr, lay, items, auto_label };
 
-    menu.scr.line(1, concat!("NetBooty ", env!("CARGO_PKG_VERSION")));
+    if logo_h > 0 {
+        menu.draw_logo();
+    }
+    menu.scr.line(1 + logo_h, concat!("NetBooty ", env!("CARGO_PKG_VERSION")));
     menu.draw_frame();
     let mut sel = 0;
     for i in 0..menu.rows() {
@@ -261,6 +293,9 @@ pub fn run(
     let mut idle_ms = 0u32;
     let mut last_shown = u32::MAX;
     let outcome = loop {
+        if let Some(net) = tick() {
+            menu.network(&net);
+        }
         if let Some(k) = read_key() {
             idle_ms = 0;
             if countdown.take().is_some() {

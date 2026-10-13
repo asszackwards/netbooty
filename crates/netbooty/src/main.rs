@@ -10,8 +10,10 @@ extern crate alloc;
 
 mod bootvars;
 mod device;
+mod entropy;
 mod guard;
 mod menu;
+mod net;
 mod oneshot;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
@@ -114,6 +116,19 @@ fn resolve_targets(cfg: &Config, own: Option<u16>) -> Vec<Option<Resolved>> {
         .collect()
 }
 
+/// Keep the last network outcome for `netbooty-setup doctor`; written only
+/// when it changes, to spare NVRAM.
+fn save_net_status(status: &str) {
+    let name = uefi::CString16::try_from(netbooty_cfg::VAR_NET_STATUS).unwrap();
+    let vendor = bootvars::netbooty_vendor();
+    let mut buf = [0u8; 512];
+    let same = runtime::get_variable(&name, &vendor, &mut buf).is_ok_and(|(d, _)| d == status.as_bytes());
+    if !same {
+        let text = &status.as_bytes()[..status.len().min(buf.len())];
+        let _ = runtime::set_variable(&name, &vendor, bootvars::nv_bs_rt(), text);
+    }
+}
+
 enum Choice {
     Target(usize),
     Exit,
@@ -145,19 +160,46 @@ fn decide(cfg: &Config, resolved: &[Option<Resolved>]) -> Choice {
         Some(i) => alloc::format!("default {}", cfg.targets[i].name),
         None => String::from("default: next firmware boot entry"),
     };
-    if let menu::Outcome::Pick(i) =
-        menu::run(cfg.menu_mode, cfg.menu_timeout_s, &items, pending, Some(&auto_hint))
-    {
+    // Ask the boot server now, so the network step overlaps the countdown.
+    let mut query = net::Query::start(cfg);
+    let outcome = {
+        let mut tick = || {
+            let q = query.as_mut()?;
+            q.poll();
+            q.take_change().map(String::from)
+        };
+        menu::run(cfg.menu_mode, cfg.menu_timeout_s, &items, pending, Some(&auto_hint), &mut tick)
+    };
+    // Network messages are collected while the menu owns the screen.
+    // Also keeps the latest status for `netbooty-setup doctor`, whichever
+    // path decided the boot.
+    let flush = |q: &mut Option<net::Query>| {
+        for line in q.as_mut().map(net::Query::take_notes).unwrap_or_default() {
+            println!("NETBOOTY: {line}");
+        }
+        if let Some(q) = q.as_ref() {
+            save_net_status(q.status());
+        }
+    };
+
+    if let menu::Outcome::Pick(i) = outcome {
+        flush(&mut query);
         println!("NETBOOTY: decision=menu target={}", cfg.targets[i].name);
         return Choice::Target(i);
     }
 
     if let Some(i) = request.filter(|&i| available(i)) {
+        flush(&mut query);
         println!("NETBOOTY: decision=os-request target={}", cfg.targets[i].name);
         return Choice::Target(i);
     }
 
-    // Network step (milestone 3/4) goes here.
+    // Milestone 3: the server's reply is only reported, never acted on.
+    // Milestone 4 verifies its signature and boots the target it names.
+    if let Some(q) = query.as_mut() {
+        q.wait();
+    }
+    flush(&mut query);
 
     match cfg.default {
         Some(i) if available(i) => {

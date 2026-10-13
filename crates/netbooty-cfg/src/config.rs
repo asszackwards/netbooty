@@ -20,6 +20,7 @@ pub const DESC_LEN: usize = 60;
 pub const PATH_LEN: usize = 128;
 
 const FLAG_PROVISIONED: u16 = 1 << 0;
+const FLAG_NETWORK: u16 = 1 << 1;
 
 // Header offsets.
 const O_MAGIC: usize = 0;
@@ -124,6 +125,8 @@ pub struct Target {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub provisioned: bool,
+    /// Ask a boot server on the LAN (off unless configured).
+    pub network: bool,
     pub keys: Vec<[u8; 32]>,
     /// Index into `targets`, or `None` for "exit to firmware".
     pub default: Option<usize>,
@@ -145,6 +148,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             provisioned: false,
+            network: false,
             keys: Vec::new(),
             default: None,
             menu_mode: MenuMode::OnKey,
@@ -153,7 +157,7 @@ impl Default for Config {
             fallback: Fallback::Exit,
             reassert_bootorder: true,
             retries: 2,
-            net_timeout_ms: 2000,
+            net_timeout_ms: 10_000,
             port: DEFAULT_PORT,
             server_ip: None,
             client_id: [0; 16],
@@ -299,6 +303,7 @@ impl Config {
 
         Ok(Self {
             provisioned: flags & FLAG_PROVISIONED != 0,
+            network: flags & FLAG_NETWORK != 0,
             keys,
             default,
             menu_mode: if b[O_MENU_MODE] == 1 { MenuMode::Always } else { MenuMode::OnKey },
@@ -332,7 +337,9 @@ impl Config {
         }
 
         let mut b = placeholder();
-        wr16(&mut b, O_FLAGS, if self.provisioned { FLAG_PROVISIONED } else { 0 });
+        let flags = (if self.provisioned { FLAG_PROVISIONED } else { 0 })
+            | (if self.network { FLAG_NETWORK } else { 0 });
+        wr16(&mut b, O_FLAGS, flags);
         b[O_KEY_COUNT] = self.keys.len() as u8;
         b[O_DEFAULT] = self.default.map_or(DEFAULT_EXIT, |i| i as u8);
         b[O_MENU_MODE] = (self.menu_mode == MenuMode::Always) as u8;
@@ -383,6 +390,7 @@ mod tests {
     fn sample() -> Config {
         Config {
             provisioned: true,
+            network: true,
             keys: vec![[7; 32], [9; 32]],
             default: Some(1),
             menu_mode: MenuMode::Always,

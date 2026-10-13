@@ -8,6 +8,7 @@ license.workspace = true
 netbooty-cfg.workspace = true
 uefi.workspace = true
 log.workspace = true
+uefi-raw = "0.17"
 
 [features]
 # Simulated firmware misbehavior for the QEMU test suite. Never ship with this.
