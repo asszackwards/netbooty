@@ -10,8 +10,9 @@
 //! ```
 //!
 //! Every file has `"version": 1` and is replaced atomically (temp file +
-//! rename), and each file has a single writer, so the web app never needs
-//! the key and the two never overwrite each other's updates.
+//! rename), and each file has a single writer, so the two never overwrite
+//! each other's updates. The responder and the web app run as different
+//! users: only the responder can read `<data>/key`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -52,6 +53,9 @@ pub struct Client {
     pub choice: Option<String>,
     #[serde(default)]
     pub once: Option<Once>,
+    /// For Wake-on-LAN; learned and edited by the web app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
 }
 
 /// Written by the web app / CLI.
@@ -322,6 +326,7 @@ mod tests {
             targets: vec!["windows".into(), "linux".into()],
             choice: choice.map(String::from),
             once: once.map(|(id, t)| Once { id: id.into(), target: t.into() }),
+            mac: None,
         }
     }
 
@@ -370,5 +375,17 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fields_from_the_web_app_survive_a_cli_rewrite() {
+        let json = r#"{"version": 1, "clients": {"ab": {"name": "pc", "targets": ["windows"],
+            "choice": null, "once": null, "mac": "aa:bb:cc:dd:ee:ff"}}, "dismissed": []}"#;
+        let s: State = serde_json::from_str(json).unwrap();
+        assert_eq!(s.clients["ab"].mac.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        let back = serde_json::to_string(&s).unwrap();
+        assert!(back.contains("\"mac\":\"aa:bb:cc:dd:ee:ff\""));
+        // Without a MAC the field is left out, as before.
+        assert!(!serde_json::to_string(&client(None, None)).unwrap().contains("mac"));
     }
 }

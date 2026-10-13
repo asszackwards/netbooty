@@ -176,6 +176,7 @@ mod tests {
                 targets: vec!["windows".into(), "linux".into()],
                 choice: Some("linux".into()),
                 once: Some(Once { id: "x".into(), target: "windows".into() }),
+                mac: None,
             },
         );
         store.save_state(&st).unwrap();

@@ -7,6 +7,8 @@ Standard library only. Configure with environment variables:
     NETBOOTY_API_TOKEN  bearer token for the JSON API (optional; the API also accepts a login session)
     NETBOOTY_WEB_BIND   listen address (default 0.0.0.0)
     NETBOOTY_WEB_PORT   listen port (default 8470)
+    NETBOOTY_PING_SECS  how often to ping each PC for its power status (default 15)
+    NETBOOTY_WOL_ADDR   where to send Wake-on-LAN packets (default 255.255.255.255:9)
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from .power import WOL_PORT, Monitor
 from .store import StateError, Store
 
 SESSION_SECS = 12 * 3600
@@ -32,11 +35,22 @@ COOKIE = "netbooty_session"
 
 
 class Config:
-    def __init__(self, data: str, password: str, api_token: str | None):
+    def __init__(self, data: str, password: str, api_token: str | None, monitor: Monitor | None = None):
         self.store = Store(data)
         self.password = password
         self.api_token = api_token
         self.secret = secrets.token_bytes(32)  # sessions end when the app restarts
+        # Pings only once started (in main()).
+        self.monitor = monitor or Monitor(self.store)
+
+    def pcs(self) -> list[dict]:
+        """`Store.pcs()` plus each PC's power status."""
+        out = []
+        for pc in self.store.pcs():
+            power = self.monitor.snapshot(pc)
+            power["summary"] = power_summary(power, pc)
+            out.append({**pc, "power": power})
+        return out
 
     def session(self) -> str:
         expiry = str(int(time.time()) + SESSION_SECS)
@@ -66,6 +80,51 @@ def ago(ts) -> str:
     return f"{d // 86400}d ago"
 
 
+def power_summary(p: dict, pc: dict) -> str:
+    match p["state"]:
+        case "unavailable":
+            return f"Power status unavailable: {p.get('error')}"
+        case "waking":
+            return f"◌ Waking… (sent {ago(p['since'])})"
+        case "off":
+            text = f"○ Off since {ago(p['since'])}"
+            if p["wake_failed"]:
+                text += (" · did not wake: check Wake-on-LAN in the BIOS (ErP off) and the OS's "
+                         "network card settings")
+            return text
+        case "on":
+            parts = ["● On"]
+            if p["running"] is None:
+                parts.append("running: unknown (did not ask the server this boot)")
+            elif p["running"]:
+                parts.append(f"probably running {p['running']} (asked at boot {ago(p['asked_at'])})")
+            else:
+                parts.append(f"probably running its own default (asked at boot {ago(p['asked_at'])})")
+            if p["os_hint"]:
+                parts.append(f"replies like {p['os_hint']} (TTL {p['ttl']})")
+            return " · ".join(parts)
+    if not pc.get("from"):
+        return "Power: unknown until the PC has asked the server once"
+    return "Power: checking…"
+
+
+# Refreshes the power lines and wake forms without reloading the page.
+POWER_SCRIPT = """<script>
+setInterval(async () => {
+  try {
+    const r = await fetch('/api/state');
+    if (!r.ok) return;
+    for (const pc of (await r.json()).pcs) {
+      const line = document.getElementById('power-' + pc.id);
+      if (line) line.textContent = pc.power.summary;
+      const wake = document.getElementById('wake-' + pc.id);
+      if (wake) wake.hidden = pc.power.state === 'on';
+    }
+  } catch (e) {}
+}, 10000);
+</script>"""
+
+
 STYLE = """
 :root { --bg:#fff; --fg:#1b1b1b; --muted:#666; --line:#ddd; --accent:#2457c5; --card:#f7f7f8; }
 @media (prefers-color-scheme: dark) { :root { --bg:#141416; --fg:#e8e8ea; --muted:#9a9aa2; --line:#2c2c31;
@@ -79,7 +138,7 @@ input, select, button { font:inherit; padding:5px 8px; border:1px solid var(--li
   background:var(--bg); color:var(--fg) } button { cursor:pointer } button.primary { background:var(--accent);
   color:#fff; border-color:var(--accent) } code, .code { font-family:ui-monospace, monospace; font-size:13px;
   word-break:break-all } .err { color:#c0392b } form { display:inline } header { display:flex;
-  justify-content:space-between; align-items:center }
+  justify-content:space-between; align-items:center } [hidden] { display:none !important }
 """
 
 
@@ -124,7 +183,7 @@ def dashboard(cfg: Config, error: str = "", host: str | None = None) -> bytes:
         parts.append(f"<p class=err>{esc(error)}</p>")
 
     parts.append("<h2>PCs</h2>")
-    pcs = st.pcs()
+    pcs = cfg.pcs()
     if not pcs:
         parts.append("<p class=muted>No PCs approved yet. Pair a PC (below), then approve it under New PCs.</p>")
     for pc in pcs:
@@ -140,6 +199,8 @@ def dashboard(cfg: Config, error: str = "", host: str | None = None) -> bytes:
         )
         once = (f"<span>next boot: <b>{esc(pc['once'])}</b></span>"
                 f"<form method=post action='/pc/{pc['id']}/once'><button>cancel</button></form>") if pc["once"] else ""
+        wake_opts = "".join(f"<option value='{esc(t)}'>{esc(t)}</option>" for t in pc["targets"])
+        hidden = "hidden" if pc["power"]["state"] == "on" else ""
         answer = pc["last_answer"] or "no preference"
         seen = (f"last asked {ago(pc['last_seen'])} from {esc(pc['from'])}, answered {esc(answer)}"
                 if pc["last_seen"] else "has not asked yet")
@@ -149,6 +210,12 @@ def dashboard(cfg: Config, error: str = "", host: str | None = None) -> bytes:
 <form method=post action='/pc/{pc['id']}/choice' class=row>Boots <select name=target>
 <option value='' {none_sel}>its own default</option>{opts}</select><button>Save</button></form></div>
 <div class=row style='margin-top:6px'>{once_buttons} {once}</div>
+<div class=row style='margin-top:6px'><span id='power-{pc['id']}'>{esc(pc['power']['summary'])}</span></div>
+<div class=row style='margin-top:6px'>
+<form method=post action='/pc/{pc['id']}/wake' class=row id='wake-{pc['id']}' {hidden}>Wake into
+<select name=target><option value=''>its usual choice</option>{wake_opts}</select><button>Wake</button></form>
+<form method=post action='/pc/{pc['id']}/mac' class=row>MAC <input name=mac value='{esc(pc['mac'] or '')}'
+placeholder='learned when seen on' size=17><button>Save</button></form></div>
 <div class='row muted' style='margin-top:6px'>{seen}
 <form method=post action='/pc/{pc['id']}/remove' onsubmit="return confirm('Remove this PC?')">
 <button>Remove</button></form></div></div>""")
@@ -182,6 +249,8 @@ def dashboard(cfg: Config, error: str = "", host: str | None = None) -> bytes:
 then check that it shows this fingerprint.</p></div>""")
     else:
         parts.append("<p class=err>The responder has not published a key yet. Is it running?</p>")
+    if pcs:
+        parts.append(POWER_SCRIPT)
     return page("NetBooty", "".join(parts))
 
 
@@ -288,6 +357,10 @@ class Handler(BaseHTTPRequestHandler):
                     st.set_once(cid, f.get("target") or None)
                 case ["pc", cid, "remove"]:
                     st.remove(cid)
+                case ["pc", cid, "wake"]:
+                    self.cfg.monitor.wake(cid, f.get("target") or None)
+                case ["pc", cid, "mac"]:
+                    st.set_mac(cid, f.get("mac", "").strip() or None)
                 case ["request", cid, "approve"]:
                     targets = [t.strip() for t in f.get("targets", "").split(",") if t.strip()]
                     st.approve(cid, f.get("name", "").strip(), targets)
@@ -310,7 +383,7 @@ class Handler(BaseHTTPRequestHandler):
                 case ("GET", ["state"]):
                     pub = st.public()
                     return self.json(200, {
-                        "pcs": st.pcs(),
+                        "pcs": self.cfg.pcs(),
                         "requests": st.pending_requests(),
                         "pairing": {"code": pairing_code(pub, self.headers.get("Host")),
                                     "fingerprints": pub.get("fingerprints", [])},
@@ -319,6 +392,10 @@ class Handler(BaseHTTPRequestHandler):
                     st.set_choice(st.find_pc(key), data.get("target"))
                 case ("POST", ["pcs", key, "once"]):
                     st.set_once(st.find_pc(key), data.get("target"))
+                case ("POST", ["pcs", key, "wake"]):
+                    self.cfg.monitor.wake(st.find_pc(key), data.get("target"))
+                case ("POST", ["pcs", key, "mac"]):
+                    st.set_mac(st.find_pc(key), data.get("mac"))
                 case ("DELETE", ["pcs", key]):
                     st.remove(st.find_pc(key))
                 case ("POST", ["requests", cid, "approve"]):
@@ -344,6 +421,11 @@ def main() -> None:
         password = secrets.token_urlsafe(12)
         print(f"NETBOOTY_PASSWORD is not set; generated password for this run: {password}", flush=True)
     cfg = Config(data, password, os.environ.get("NETBOOTY_API_TOKEN") or None)
+    wol = os.environ.get("NETBOOTY_WOL_ADDR", "255.255.255.255")
+    wol_host, _, wol_port = wol.partition(":")
+    cfg.monitor.wol_addr = (wol_host, int(wol_port or WOL_PORT))
+    cfg.monitor.interval = float(os.environ.get("NETBOOTY_PING_SECS", "15"))
+    cfg.monitor.start()
     bind = os.environ.get("NETBOOTY_WEB_BIND", "0.0.0.0")
     port = int(os.environ.get("NETBOOTY_WEB_PORT", "8470"))
     srv = make_server(cfg, bind, port)

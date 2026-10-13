@@ -1,4 +1,4 @@
-"""Milestone 4 against the real containers from server/compose.yaml.
+"""The boot server against the real container from server/compose.yaml.
 
 Skipped unless Docker is usable by this user. Runs a separate compose project
 (own volumes, free ports) and tears it down afterwards.
@@ -50,7 +50,7 @@ class Stack:
                               env=self.env, capture_output=True, text=True, check=check)
 
     def responder(self, *args) -> str:
-        return self.compose("exec", "-T", "responder", "/netbooty-server", *args).stdout
+        return self.compose("exec", "-T", "netbooty", "netbooty-server", *args).stdout
 
     def api(self, method, path, body=None):
         req = urllib.request.Request(f"http://127.0.0.1:{self.web}{path}", method=method,
@@ -79,18 +79,24 @@ def stack():
         s.compose("down", "-v", check=False)
 
 
-def test_images_are_small_and_unprivileged(stack):
-    for image, limit in (("netbooty-responder", 10e6), ("netbooty-web", 120e6)):
-        info = json.loads(subprocess.run(["docker", "image", "inspect", image], capture_output=True,
-                                         text=True, check=True).stdout)[0]
-        assert info["Size"] < limit, (image, info["Size"])
-        assert info["Config"]["User"].startswith("10001"), image
+def test_image_is_small_and_services_run_unprivileged(stack):
+    info = json.loads(subprocess.run(["docker", "image", "inspect", "netbooty-server"], capture_output=True,
+                                     text=True, check=True).stdout)[0]
+    assert info["Size"] < 130e6, info["Size"]
+    # Only the launcher runs as root. (busybox ps cuts user names at 8 characters.)
+    ps = stack.compose("exec", "-T", "netbooty", "ps", "-o", "user,args").stdout
+    user = {line.split()[-1]: line.split()[0] for line in ps.splitlines()}
+    assert user["serve"] == "responde" and user["netbooty_web"] == "web", ps
 
 
-def test_web_container_has_no_key(stack):
-    r = stack.compose("exec", "-T", "web", "ls", "/data", check=False)
-    assert "key" not in r.stdout.split()
-    assert "state" in r.stdout.split()
+def test_only_the_responder_can_read_the_key(stack):
+    r = stack.compose("exec", "-T", "-u", "web", "netbooty", "cat", "/data/key/current.seed", check=False)
+    assert r.returncode != 0
+    r = stack.compose("exec", "-T", "-u", "web", "netbooty", "ls", "/data/state")
+    assert "state.json" in r.stdout or "public.json" in r.stdout
+    # The CLI runs as the responder (through the wrapper), so it can.
+    code = stack.responder("pair", "--port", str(stack.udp), "--advertise-ip", "none")
+    assert code.startswith("netbooty-pair:")
 
 
 def test_pair_approve_choose_through_the_containers(scenario, stack):
@@ -116,3 +122,4 @@ def test_pair_approve_choose_through_the_containers(scenario, stack):
     assert r.has("decision=network target=alpha")
     pc = stack.api("GET", "/api/state")["pcs"][0]
     assert pc["last_answer"] == "alpha"
+    assert pc["power"]["state"] in ("unknown", "on", "off", "unavailable")

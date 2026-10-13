@@ -1,37 +1,30 @@
 # NetBooty server: `docker compose up -d` in this directory, then open http://<this-host>:8470
 # Set NETBOOTY_PASSWORD (and optionally NETBOOTY_API_TOKEN) in server/.env first.
 services:
-  responder:
+  netbooty:
     build:
       context: ..
-      dockerfile: server/responder.Dockerfile
-    image: netbooty-responder
-    # Host networking so PCs can find it by broadcast (Docker's port
-    # publishing does not forward broadcasts). It only listens on UDP 47000.
+      dockerfile: server/Dockerfile
+    image: netbooty-server
+    # Host networking: PCs find the server by broadcast (Docker's port
+    # publishing does not forward broadcasts), Wake-on-LAN packets must reach
+    # the LAN, and the web app learns PCs' MAC addresses from the host's ARP
+    # table. Listens on UDP 47000 and TCP 8470.
     network_mode: host
     restart: unless-stopped
     environment:
       NETBOOTY_PORT: ${NETBOOTY_PORT:-47000}
+      NETBOOTY_WEB_PORT: ${NETBOOTY_WEB_PORT:-8470}
+      NETBOOTY_PASSWORD: ${NETBOOTY_PASSWORD:?set NETBOOTY_PASSWORD in server/.env}
+      NETBOOTY_API_TOKEN: ${NETBOOTY_API_TOKEN:-}
+      # How often each PC is pinged for its power status, in seconds.
+      NETBOOTY_PING_SECS: ${NETBOOTY_PING_SECS:-15}
       # Address put in the pairing code; auto-detected. Set it if that picks
       # the wrong interface, or "none" to rely on broadcast only.
       # NETBOOTY_ADVERTISE_IP: "10.10.0.5"
     volumes:
-      - netbooty-key:/data/key        # the private key: only this container
+      - netbooty-key:/data/key        # the private key: readable by the responder user only
       - netbooty-state:/data/state
-
-  web:
-    build:
-      context: ..
-      dockerfile: server/web.Dockerfile
-    image: netbooty-web
-    restart: unless-stopped
-    ports:
-      - "${NETBOOTY_WEB_PORT:-8470}:8470"
-    environment:
-      NETBOOTY_PASSWORD: ${NETBOOTY_PASSWORD:?set NETBOOTY_PASSWORD in server/.env}
-      NETBOOTY_API_TOKEN: ${NETBOOTY_API_TOKEN:-}
-    volumes:
-      - netbooty-state:/data/state     # no key volume: the web app cannot sign
 
 volumes:
   netbooty-key:

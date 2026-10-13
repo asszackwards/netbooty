@@ -3,7 +3,7 @@
 The responder runs on this host; QEMU's user-mode network delivers the
 guest's broadcast to it and its unicast reply back. The server's own CLI is
 used to approve the PC and choose what it boots, exactly as `docker compose
-exec responder /netbooty-server ...` would.
+exec netbooty netbooty-server ...` would.
 """
 
 import re

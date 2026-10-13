@@ -5,7 +5,8 @@
     <data>/state/requests.json  written by the responder (pairing requests)
     <data>/state/status.json    written by the responder (last seen / answered)
 
-The web app never opens <data>/key; it cannot sign anything.
+The web app never opens <data>/key; it cannot sign anything. In the container
+it runs as a different user from the responder, so it could not read it either.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from pathlib import Path
 
 VERSION = 1
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,15}$")
+MAC_RE = re.compile(r"^[0-9a-f]{12}$")
 ONCE_GRACE_SECS = 60
 
 
@@ -29,6 +31,14 @@ class StateError(ValueError):
 
 def valid_name(name: str) -> bool:
     return bool(NAME_RE.match(name))
+
+
+def normalize_mac(mac: str) -> str:
+    """`AA-BB-CC-DD-EE-FF`, `aabb.ccdd.eeff` etc. -> `aa:bb:cc:dd:ee:ff`."""
+    digits = re.sub(r"[\s:.-]", "", str(mac)).lower()
+    if not MAC_RE.match(digits) or digits in ("0" * 12, "f" * 12):
+        raise StateError(f"invalid MAC address {mac!r}")
+    return ":".join(digits[i:i + 2] for i in range(0, 12, 2))
 
 
 class Store:
@@ -93,6 +103,7 @@ class Store:
                 "last_seen": st.get("last_seen"),
                 "from": st.get("from"),
                 "last_answer": st.get("last_answer"),
+                "mac": c.get("mac"),
             })
         return out
 
@@ -143,6 +154,21 @@ class Store:
             else:
                 self._check_target(c, target)
                 c["once"] = {"id": secrets.token_hex(8), "target": target}
+        self.update(fn)
+
+    def set_mac(self, cid: str, mac: str | None, only_if_unset: bool = False) -> None:
+        mac = normalize_mac(mac) if mac else None
+
+        def fn(s):
+            c = s["clients"].get(cid)
+            if c is None:
+                raise StateError("no such PC")
+            if only_if_unset and c.get("mac"):
+                return
+            if mac:
+                c["mac"] = mac
+            else:
+                c.pop("mac", None)
         self.update(fn)
 
     def approve(self, cid: str, name: str, targets: list[str]) -> None:

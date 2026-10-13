@@ -90,13 +90,14 @@ Order of precedence: **menu pick → OS request (`next`) → boot server → def
 
 ## Boot server
 
-A small server on your LAN decides what each paired PC boots. It is two
-lightweight containers:
+A small server on your LAN decides what each paired PC boots. It is one
+container (host networking) running two processes as separate users:
 
-- **responder** (Rust, a few MB, host networking so PCs find it by broadcast;
-  listens only on UDP 47000): the only holder of the signing key.
+- **responder** (Rust, UDP 47000): answers PCs at boot. The only user that can
+  read the signing key.
 - **web** (Python standard library, port 8470): pairing, approving PCs, choosing
-  what they boot, and a JSON API. It has no access to the key.
+  what they boot, power status and Wake-on-LAN, and a JSON API. It cannot read
+  the key.
 
 ```bash
 cd server
@@ -129,7 +130,7 @@ Security: NetBooty only acts on replies signed by the paired key, for its own
 client ID and a fresh nonce from this boot. Anyone else on the LAN can at most
 make it fall back to its default. Unapproved PCs get no answer.
 
-**Without the web app** (`docker compose exec responder /netbooty-server …`):
+**Without the web app** (`docker compose exec netbooty netbooty-server …`):
 `status`, `client list`, `client approve <id|hostname> --name pc`,
 `set <pc> <target|none>`, `next <pc> <target>`, `pair`.
 
@@ -139,7 +140,30 @@ make it fall back to its default. Unapproved PCs get no answer.
 curl -H "Authorization: Bearer $TOKEN" http://server:8470/api/state
 curl -H "Authorization: Bearer $TOKEN" -d '{"target":"windows"}' http://server:8470/api/pcs/gamingpc/once
 curl -H "Authorization: Bearer $TOKEN" -d '{"target":null}'      http://server:8470/api/pcs/gamingpc/choice
+curl -H "Authorization: Bearer $TOKEN" -d '{"target":"linux"}'   http://server:8470/api/pcs/gamingpc/wake
+curl -H "Authorization: Bearer $TOKEN" -d '{"mac":"aa:bb:cc:dd:ee:ff"}' http://server:8470/api/pcs/gamingpc/mac
 ```
+
+### Power and wake
+
+The server pings each PC (every 15 s, `NETBOOTY_PING_SECS`) at the address it
+last asked from, and shows it as **On** or **Off**. For a PC that is on it also
+shows what it is *probably* running: what the server answered when it booted,
+if it asked during this power-on (a menu pick or OS request on the PC is not
+seen), plus a hint from the ping's TTL (Windows replies with 128, Linux with 64).
+
+When a PC is off, *Wake into* sets a one-time choice (or keeps its usual one)
+and sends a Wake-on-LAN packet. NetBooty then asks the server and boots that OS.
+The server learns the PC's MAC address the first time it sees it on; you can
+also enter it on the PC's card.
+
+- Enable Wake-on-LAN in the BIOS (on many boards: *ErP* off, *Wake on LAN*
+  on), and in the OS's network card settings if it should also wake from sleep.
+- Windows does not answer ping by default. In an elevated PowerShell:
+  `Enable-NetFirewallRule -Name FPS-ICMP4-ERQ-In`.
+- Pinging without root needs the host's `net.ipv4.ping_group_range` to include
+  the container's group (10000). Most distributions allow every group; if not,
+  the page says *Power status unavailable*.
 
 Notes:
 - PCs find the server by broadcast and also ask its address directly, for
@@ -147,12 +171,12 @@ Notes:
   the server answered from; a copied code uses the address you opened the web
   page at (or `NETBOOTY_ADVERTISE_IP`, if set in `compose.yaml`). Give the
   server a fixed address (DHCP reservation).
-- The responder must use host networking (as in `compose.yaml`); it logs a
-  warning if it finds itself on a container network, where broadcasts from
-  PCs cannot reach it.
+- The container must use host networking (as in `compose.yaml`): broadcasts
+  from PCs and Wake-on-LAN packets do not cross Docker's networks. The
+  responder logs a warning if it finds itself on a container network.
 - The web port is plain HTTP. Keep it on your LAN or put it behind a reverse
   proxy with TLS.
-- **Key rotation:** `docker compose exec responder /netbooty-server keygen --next`,
+- **Key rotation:** `docker compose exec netbooty netbooty-server keygen --next`,
   re-pair each PC with the new code (it lists both keys), then
   `… keygen --promote`.
 
