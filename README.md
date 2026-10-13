@@ -1,17 +1,28 @@
 # NetBooty
 
-A small UEFI boot selector for multi-boot PCs. NetBooty shows a GRUB-style menu
-(or none), picks a boot target, sets the firmware's `BootNext` and resets, so the
-firmware starts the chosen OS's **own** boot entry. Nothing is chainloaded, so
-each OS's measured boot stays as if it had been started directly (BitLocker
-keeps its PCR7 binding, for example).
+Choose which OS your multi-boot PCs start, from anywhere on your network.
 
+NetBooty is a small UEFI boot selector. On every boot it asks a boot server on
+your LAN which OS to start. You set that from a web page or a JSON API, either
+until you change it or for the next boot only, so nobody needs to be at the PC.
+NetBooty then sets the firmware's `BootNext` and resets, and the firmware starts
+the chosen OS's **own** boot entry. Nothing is chainloaded, so each OS's
+measured boot stays as if it had been started directly (BitLocker keeps its
+PCR7 binding, for example).
+
+- **Remote OS choice:** the boot server (two small Docker containers) decides
+  what each paired PC boots, always or just once
+- **Signed answers:** NetBooty only acts on replies signed by its paired server
+  for this PC and this boot. Anyone else on the LAN can at most make it fall
+  back to its default
+- **No PXE or extra hardware:** it uses the firmware's own network stack, and
+  the network step runs during the menu countdown
+- Local control too: a GRUB-style menu, and one-shot requests ("boot Windows
+  next") from Linux and Windows
 - Works with any UEFI firmware and any set of OSes on one or more disks
 - Secure Boot via the distro's signed shim and a dedicated MOK, your own keys
   (e.g. sbctl), or Secure Boot off
-- OS-side one-shot requests ("boot Windows next") from Linux and Windows
 - Keeps itself first in the boot order after OS updates
-- A boot server on your LAN can choose the OS remotely (signed replies; web app + API in Docker)
 
 ## Quick start (Linux)
 

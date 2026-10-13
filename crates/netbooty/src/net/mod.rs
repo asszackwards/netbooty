@@ -2,7 +2,9 @@
 //!
 //! [`Query`] is a non-blocking state machine: `poll()` it from the menu loop
 //! (or a wait loop) until it is done, so the network step overlaps the menu
-//! countdown. In milestone 3 replies are only reported, never acted on.
+//! countdown. A reply decides the boot only when it is signed by a paired
+//! key for this client and a nonce from this boot; without a paired key,
+//! replies are only reported.
 
 mod udp4;
 
