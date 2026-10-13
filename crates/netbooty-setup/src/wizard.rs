@@ -16,7 +16,7 @@ use netbooty_cfg::loadopt::{LoadOption, matches};
 
 use crate::efivars::Store;
 use crate::install::{self, ENTRY_LABEL, InstallOpts, KEY_DIR, Mode};
-use crate::settings::{FallbackArg, MenuArg, ResetArg, SETTINGS_PATH, Settings};
+use crate::settings::{FallbackArg, MenuArg, NetworkSettings, ResetArg, SETTINGS_PATH, Settings};
 use crate::spec::{self, Discovered, fmt_part};
 use crate::system::{self, MokState, SecureBoot};
 
@@ -384,6 +384,9 @@ fn configure(store: &Store, previous: Option<&Settings>) -> Result<bool> {
         previous.map_or(10, |p| p.menu_timeout)
     };
 
+    let network = ask_network(previous.map(|p| p.network.clone()).unwrap_or_default())?;
+    let newly_paired = !network.keys.is_empty() && previous.is_none_or(|p| p.network.keys != network.keys);
+
     let s = Settings {
         targets: targets.into_iter().map(|(_, s)| s).collect(),
         default,
@@ -399,7 +402,7 @@ fn configure(store: &Store, previous: Option<&Settings>) -> Result<bool> {
         key: previous.and_then(|p| p.key.clone()),
         cert: previous.and_then(|p| p.cert.clone()),
         first: previous.is_some_and(|p| p.first),
-        network: previous.map(|p| p.network.clone()).unwrap_or_default(),
+        network,
     };
 
     println!("\nSettings to install (saved in {SETTINGS_PATH}):\n{}", s.to_toml()?);
@@ -408,7 +411,65 @@ fn configure(store: &Store, previous: Option<&Settings>) -> Result<bool> {
         return Ok(false);
     }
     install::install(&s, opts())?;
+    if newly_paired && !dry() {
+        match crate::pair::announce(&s.network) {
+            Ok(host) => println!("\nAnnounced as {host}: approve it on the server's web page (New PCs)."),
+            Err(e) => println!("\nCould not announce ({e:#}); the PC will appear there after its next boot."),
+        }
+    }
     Ok(true)
+}
+
+/// The boot-server step: keep, change or add a pairing.
+fn ask_network(mut n: NetworkSettings) -> Result<NetworkSettings> {
+    let paired = !n.keys.is_empty();
+    let mut choices = Vec::new();
+    if paired {
+        choices.push(format!("Keep the paired server (key {})", crate::pair::fingerprints(&n)));
+    }
+    choices.push(String::from(if paired {
+        "Pair with a different server"
+    } else {
+        "Pair with a NetBooty server"
+    }));
+    choices.push(String::from(if paired {
+        "Unpair (only report server replies)"
+    } else {
+        "No server for now"
+    }));
+    let pick = Select::with_theme(&theme())
+        .with_prompt("Boot server (lets a server on your LAN choose the OS)")
+        .items(&choices)
+        .default(0)
+        .interact()?;
+    let offset = usize::from(!paired);
+    match pick + offset {
+        0 => {}
+        1 => loop {
+            let code: String = Input::with_theme(&theme())
+                .with_prompt("Paste the pairing code from the server's web page")
+                .validate_with(|c: &String| -> Result<(), String> {
+                    netbooty_cfg::pairing::Pairing::decode(c)
+                        .map(|_| ())
+                        .map_err(|_| "not a pairing code".into())
+                })
+                .interact_text()?;
+            let mut candidate = n.clone();
+            crate::pair::apply(&code, &mut candidate)?;
+            println!("Server key fingerprint: {}", crate::pair::fingerprints(&candidate));
+            if Confirm::with_theme(&theme())
+                .with_prompt("Does it match the fingerprint shown on the server's web page?")
+                .default(true)
+                .interact()?
+            {
+                n = candidate;
+                break;
+            }
+        },
+        _ => crate::pair::unpair(&mut n),
+    }
+    n.enabled = true;
+    Ok(n)
 }
 
 /// After installing: offer the reboot that the next step needs.

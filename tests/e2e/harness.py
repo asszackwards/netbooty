@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BUILD_DIR = ROOT / "target" / "e2e"
 EFI_DIR = BUILD_DIR / "x86_64-unknown-uefi" / "release"
 SETUP_BIN = BUILD_DIR / "debug" / "netbooty-setup"
+SERVER_BIN = BUILD_DIR / "debug" / "netbooty-server"
 OVMF_CODE = Path("/usr/share/OVMF/OVMF_CODE_4M.fd")
 OVMF_VARS = Path("/usr/share/OVMF/OVMF_VARS_4M.fd")
 # Secure Boot build (SMM) and a variable store with Microsoft's keys enrolled,
@@ -41,7 +42,7 @@ def build_all() -> None:
     run("cargo", "build", "--release", "--target", "x86_64-unknown-uefi", "-p", "netbooty", "-p", "testbed",
         "--features", "netbooty/test-hooks",
         cwd=ROOT, env=env)
-    run("cargo", "build", "-p", "netbooty-setup", cwd=ROOT, env=env)
+    run("cargo", "build", "-p", "netbooty-setup", "-p", "netbooty-server", cwd=ROOT, env=env)
 
 
 @dataclass

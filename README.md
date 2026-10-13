@@ -11,7 +11,7 @@ keeps its PCR7 binding, for example).
   (e.g. sbctl), or Secure Boot off
 - OS-side one-shot requests ("boot Windows next") from Linux and Windows
 - Keeps itself first in the boot order after OS updates
-- Remote selection over the LAN (signed UDP): networking works, choosing the OS remotely is in progress
+- A boot server on your LAN can choose the OS remotely (signed replies; web app + API in Docker)
 
 ## Quick start (Linux)
 
@@ -59,12 +59,13 @@ pending OS request, otherwise the default.
 
 ### Network
 
-On every boot NetBooty also asks the LAN for a boot server, using the
-firmware's own network stack (DHCP, then a UDP broadcast on port 47000). It runs
-during the menu countdown, so it normally adds no boot time, and the menu shows
-its progress on the *Network:* line. **Choosing the OS remotely is not finished
-yet:** for now NetBooty only reports whether a server answered and never changes
-what it boots because of it.
+On every boot NetBooty asks the LAN for a boot server, using the firmware's own
+network stack (DHCP, then a UDP broadcast on port 47000, plus the server's
+address if it is known). It runs during the menu countdown, so it normally adds
+no boot time; the menu shows its progress on the *Network:* line and the
+server's choice on the *Automatic* row.
+
+Order of precedence: **menu pick → OS request (`next`) → boot server → default.**
 
 - Enable the firmware's network stack in its setup (often *Network Stack* or
   *UEFI Network Stack*; PXE itself can stay off).
@@ -72,19 +73,73 @@ what it boots because of it.
   `no network stack` with "network card found…" means the stack is disabled
   in firmware setup, or the firmware lacks a random number generator (newer
   EDK2-based firmware won't start networking without one).
-- To check that a server would be reached, run the stand-in responder on
-  another machine on the LAN (`python3 tests/e2e/echo_responder.py`, UDP 47000
-  must be allowed through its firewall). The *Network:* line then shows
-  `reply from …`.
 - Settings: `--network off`, `--net-timeout <ms>` (time to get an address,
-  default 10000; the wait overlaps the menu countdown), `--net-server <ip>` (also ask this host directly), `--net-port`.
-  Pass them to `sudo netbooty-setup install`.
+  default 10000; the wait overlaps the menu countdown), `--net-server <ip>`,
+  `--net-port`. Pass them to `sudo netbooty-setup install`.
+
+## Boot server
+
+A small server on your LAN decides what each paired PC boots. It is two
+lightweight containers:
+
+- **responder** (Rust, a few MB, host networking so PCs find it by broadcast;
+  listens only on UDP 47000): the only holder of the signing key.
+- **web** (Python standard library, port 8470): pairing, approving PCs, choosing
+  what they boot, and a JSON API. It has no access to the key.
+
+```bash
+cd server
+cp .env.example .env            # set NETBOOTY_PASSWORD
+docker compose up -d
+```
+
+Open `http://<server>:8470`, log in, and copy the pairing command from *Pair a
+PC*. On the PC:
+
+```bash
+sudo netbooty-setup pair 'netbooty-pair:1:…'     # or paste it in `sudo netbooty-setup`
+```
+
+It shows the server's key fingerprint (compare it with the web page),
+reinstalls NetBooty with the server's key, and announces the PC. Approve it
+under *New PCs*, then choose what it boots:
+
+- **Boots**: the persistent choice, or *its own default*.
+- **…once**: boot a target on the next boot only, then go back to the choice.
+
+Security: NetBooty only acts on replies signed by the paired key, for its own
+client ID and a fresh nonce from this boot. Anyone else on the LAN can at most
+make it fall back to its default. Unapproved PCs get no answer.
+
+**Without the web app** (`docker compose exec responder /netbooty-server …`):
+`status`, `client list`, `client approve <id|hostname> --name pc`,
+`set <pc> <target|none>`, `next <pc> <target>`, `pair`.
+
+**API** (`Authorization: Bearer $NETBOOTY_API_TOKEN`, or a login session):
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://server:8470/api/state
+curl -H "Authorization: Bearer $TOKEN" -d '{"target":"windows"}' http://server:8470/api/pcs/gamingpc/once
+curl -H "Authorization: Bearer $TOKEN" -d '{"target":null}'      http://server:8470/api/pcs/gamingpc/choice
+```
+
+Notes:
+- The pairing code carries the server's address (auto-detected; set
+  `NETBOOTY_ADVERTISE_IP` in `compose.yaml` if it picks the wrong one), so PCs
+  also ask it directly where broadcast does not reach. Give the server a fixed
+  address (DHCP reservation).
+- The web port is plain HTTP. Keep it on your LAN or put it behind a reverse
+  proxy with TLS.
+- **Key rotation:** `docker compose exec responder /netbooty-server keygen --next`,
+  re-pair each PC with the new code (it lists both keys), then
+  `… keygen --promote`.
 
 ## Everyday use
 
 | From | Command |
 |---|---|
 | Linux | `sudo netbooty-setup next windows` boots *windows* once on the next boot (`next clear` cancels) |
+| Linux | `sudo netbooty-setup announce` shows this PC to the paired server again for approval |
 | Linux | `sudo netbooty-setup doctor` shows a read-only report of boot entries, targets, keys and services |
 | Linux | `sudo netbooty-setup` lets you change settings, repair or uninstall |
 | Windows | `tools\windows\netbooty.ps1 next linux` (elevated PowerShell) |
@@ -149,6 +204,7 @@ start an OS directly, then run `sudo netbooty-setup` to repair or uninstall.
 ```bash
 cargo test                                  # host crates
 cd tests/e2e && python3 -m pytest -q       # QEMU/OVMF boot scenarios (needs qemu, ovmf, mtools, sgdisk)
+cd server/web && python3 -m pytest -q     # web app
 ```
 
 The QEMU suite boots NetBooty against real GPT disk images, including two-disk

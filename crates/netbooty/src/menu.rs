@@ -32,11 +32,20 @@ const LOGO: [&str; 8] = [
     r#"   \        |        /"#,
     r#"    '-.___.-'-.___.-'"#,
 ];
+/// Column of the mast (`|`) in `LOGO`.
+const LOGO_MAST: usize = 12;
 
 pub struct Item<'a> {
     pub name: &'a str,
     pub hotkey: Option<char>,
     pub available: bool,
+}
+
+/// Network progress for the menu: the status line, and the server's verified
+/// choice once known (shown on the Automatic row).
+pub struct NetUpdate {
+    pub line: String,
+    pub server: Option<String>,
 }
 
 pub enum Outcome {
@@ -208,8 +217,8 @@ impl Menu<'_> {
 
     /// Logo above the title, starting at row 1.
     fn draw_logo(&self) {
-        let w = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-        let left = self.scr.cols.saturating_sub(w) / 2;
+        // Put the mast on the box's center column.
+        let left = (self.lay.left + (self.lay.width - 1) / 2).saturating_sub(LOGO_MAST);
         for (i, l) in LOGO.iter().enumerate() {
             self.scr.at(left, 1 + i, FG, BG, l);
         }
@@ -240,7 +249,7 @@ pub fn run(
     items: &[Item],
     pending: Option<&str>,
     auto_hint: Option<&str>,
-    tick: &mut dyn FnMut() -> Option<String>,
+    tick: &mut dyn FnMut() -> Option<NetUpdate>,
 ) -> Outcome {
     let triggered = match mode {
         MenuMode::Always => true,
@@ -275,7 +284,7 @@ pub fn run(
         (None, Some(h)) => format!("Automatic ({h})"),
         (None, None) => String::from("Automatic"),
     };
-    let menu = Menu { scr, lay, items, auto_label };
+    let mut menu = Menu { scr, lay, items, auto_label };
 
     if logo_h > 0 {
         menu.draw_logo();
@@ -294,7 +303,12 @@ pub fn run(
     let mut last_shown = u32::MAX;
     let outcome = loop {
         if let Some(net) = tick() {
-            menu.network(&net);
+            menu.network(&net.line);
+            // An OS request outranks the server, so keep showing it.
+            if let (Some(choice), None) = (net.server, pending) {
+                menu.auto_label = format!("Automatic (server: {choice})");
+                menu.draw_row(0, sel == 0);
+            }
         }
         if let Some(k) = read_key() {
             idle_ms = 0;

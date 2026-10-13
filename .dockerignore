@@ -1,0 +1,6 @@
+target
+.git
+tests
+server/data
+server/.env
+**/__pycache__

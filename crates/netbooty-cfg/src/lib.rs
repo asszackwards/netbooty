@@ -7,6 +7,7 @@ extern crate alloc;
 
 pub mod config;
 pub mod loadopt;
+pub mod pairing;
 pub mod proto;
 
 /// Vendor GUID for NetBooty's own UEFI variables.

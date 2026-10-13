@@ -34,18 +34,21 @@ const BROADCAST: Ipv4 = [255, 255, 255, 255];
 const REPLY_WINDOW_MS: u32 = 1500;
 const MAX_REPLY: usize = 512;
 
+/// Most signed replies to remember nonces for (one per send).
+const MAX_NONCES: usize = 8;
+
 pub enum Outcome {
-    /// The firmware exposes no UDP4 network stack (or no NIC).
-    /// Carries the per-layer handle report.
+    /// The firmware exposes no UDP4 network stack (or no NIC); carries the
+    /// per-layer handle report.
     NoStack(String),
-    /// No DHCP lease before the deadline.
     /// No DHCP lease within this many ms.
     NoAddress(u32),
-    NoReply,
-    Reply {
-        from: Ipv4,
-        data: Vec<u8>,
-    },
+    /// Nothing valid arrived; counts datagrams that failed verification.
+    NoReply { rejected: u32 },
+    /// No server is paired: a reply is only reported.
+    Unpaired { from: Ipv4, len: usize },
+    /// A correctly signed answer from the paired server.
+    Answer { from: Ipv4, reply: proto::Reply },
 }
 
 fn ip(a: Ipv4) -> String {
@@ -282,6 +285,12 @@ enum Phase {
 
 pub struct Query {
     client_id: [u8; 16],
+    keys: Vec<[u8; 32]>,
+    targets: Vec<String>,
+    /// Every nonce sent this boot: a reply to any of them is fresh.
+    nonces: Vec<[u8; 16]>,
+    rejected: u32,
+    answer: Option<proto::Reply>,
     retries: u8,
     timeout_ms: u32,
     port: u16,
@@ -359,6 +368,11 @@ impl Query {
         let resend = timer(TimerTrigger::Cancel)?;
         let mut q = Query {
             client_id: cfg.client_id,
+            keys: cfg.keys.clone(),
+            targets: cfg.targets.iter().map(|t| t.name.clone()).collect(),
+            nonces: Vec::new(),
+            rejected: 0,
+            answer: None,
             retries: cfg.retries,
             timeout_ms: timeout,
             port: cfg.port,
@@ -401,8 +415,16 @@ impl Query {
         let text = match &outcome {
             Outcome::NoStack(report) => format!("no network stack; {report}"),
             Outcome::NoAddress(ms) => format!("no address (DHCP) within {}.{} s", ms / 1000, ms % 1000 / 100),
-            Outcome::NoReply => String::from("no reply"),
-            Outcome::Reply { from, data } => format!("reply from {} ({} bytes)", ip(*from), data.len()),
+            Outcome::NoReply { rejected: 0 } => String::from("no reply"),
+            Outcome::NoReply { rejected } => format!("no valid reply ({rejected} rejected)"),
+            Outcome::Unpaired { from, len } => format!("reply from {} ({len} bytes; not paired)", ip(*from)),
+            Outcome::Answer { from, reply } => {
+                self.answer = Some(reply.clone());
+                match reply {
+                    proto::Reply::Target(t) => format!("server {}: {t}", ip(*from)),
+                    proto::Reply::NoPreference => format!("server {}: no preference", ip(*from)),
+                }
+            }
         };
         self.set_status(text);
         self.phase = Phase::Done;
@@ -425,11 +447,44 @@ impl Query {
         matches!(self.phase, Phase::Done)
     }
 
+    /// The paired server's verified answer, once there is one.
+    pub fn answer(&self) -> Option<&proto::Reply> {
+        self.answer.as_ref()
+    }
+
+    /// Check a datagram: `Some` finishes the query, `None` keeps waiting.
+    fn judge(&mut self, from: Ipv4, data: &[u8]) -> Option<Outcome> {
+        if self.keys.is_empty() {
+            return Some(Outcome::Unpaired { from, len: data.len() });
+        }
+        match proto::verify(data, &self.client_id, &self.nonces, &self.keys) {
+            Some(proto::Reply::Target(t)) => match self.targets.iter().find(|n| n.eq_ignore_ascii_case(&t)) {
+                Some(name) => Some(Outcome::Answer { from, reply: proto::Reply::Target(name.clone()) }),
+                None => {
+                    self.notes.push(format!("network: server named unknown target {t}; ignored"));
+                    self.rejected += 1;
+                    None
+                }
+            },
+            Some(proto::Reply::NoPreference) => {
+                Some(Outcome::Answer { from, reply: proto::Reply::NoPreference })
+            }
+            None => {
+                self.rejected += 1;
+                None
+            }
+        }
+    }
+
     fn send_requests(&mut self) {
         let (nonce, source) = entropy::nonce();
         if source == entropy::Source::Counter {
             self.notes.push(String::from("network: no hardware RNG; using a counter nonce"));
         }
+        if self.nonces.len() == MAX_NONCES {
+            self.nonces.remove(0);
+        }
+        self.nonces.push(nonce);
         let req = proto::request(&self.client_id, &nonce);
         let (port, server) = (self.port, self.server);
         if let Phase::Asking { session, sends_left, .. } = &mut self.phase {
@@ -481,13 +536,16 @@ impl Query {
                 }
             }
             Phase::Asking { session, .. } => {
-                if let Some((from, data)) = session.poll() {
-                    self.finish(Outcome::Reply { from, data });
+                let datagram = session.poll();
+                session.post_receive();
+                if let Some((from, data)) = datagram
+                    && let Some(outcome) = self.judge(from, &data)
+                {
+                    self.finish(outcome);
                     return;
                 }
-                session.post_receive();
                 if expired {
-                    self.finish(Outcome::NoReply);
+                    self.finish(Outcome::NoReply { rejected: self.rejected });
                 } else if boot::check_event(&self.resend).unwrap_or(false) {
                     self.send_requests();
                 }

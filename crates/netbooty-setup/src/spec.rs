@@ -281,6 +281,7 @@ pub fn build_config(s: &Settings, existing: Option<&Config>, efivars: &Store) ->
         server_ip: s.network.server.map(|ip| ip.octets()),
         net_timeout_ms: s.network.timeout_ms,
         retries: s.network.retries,
+        keys: crate::pair::keys(&s.network)?,
         ..Config::default()
     };
     cfg.default = match s.default.as_str() {

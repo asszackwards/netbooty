@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/netbooty-cfg", "crates/netbooty", "crates/netbooty-setup", "crates/testbed"]
-default-members = ["crates/netbooty-cfg", "crates/netbooty-setup"]
+members = ["crates/netbooty-cfg", "crates/netbooty", "crates/netbooty-setup", "crates/netbooty-server", "crates/testbed"]
+default-members = ["crates/netbooty-cfg", "crates/netbooty-setup", "crates/netbooty-server"]
 
 [workspace.package]
 version = "0.1.0"

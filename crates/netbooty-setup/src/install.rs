@@ -832,6 +832,19 @@ pub fn doctor() -> Result<()> {
                 "  default boot:  {}",
                 if s.first { "NetBooty" } else { "not yet (`sudo netbooty-setup activate`)" }
             );
+            let n = &s.network;
+            if !n.enabled {
+                println!("  network:       off");
+            } else if n.keys.is_empty() {
+                println!("  network:       on, not paired (replies are only reported)");
+            } else {
+                let server = n.server.map_or("broadcast".into(), |ip| ip.to_string());
+                println!(
+                    "  network:       paired with {server}:{} key {}",
+                    n.port,
+                    crate::pair::fingerprints(n)
+                );
+            }
         }
         Ok(None) => println!("  settings:      none (not installed with this version)"),
         Err(e) => println!("  settings:      {e}"),

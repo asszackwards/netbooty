@@ -4,6 +4,7 @@
 
 mod efivars;
 mod install;
+mod pair;
 mod pe;
 mod settings;
 mod spec;
@@ -86,6 +87,9 @@ struct NetArgs {
     /// How long to wait for a network address (DHCP), in ms; the server then gets 1.5 s more.
     #[arg(long)]
     net_timeout: Option<u16>,
+    /// Pairing code from a NetBooty server (sets its keys, port and address).
+    #[arg(long)]
+    pair: Option<String>,
 }
 
 impl NetArgs {
@@ -105,6 +109,9 @@ impl NetArgs {
         }
         if let Some(t) = self.net_timeout {
             n.timeout_ms = t.max(500);
+        }
+        if let Some(code) = &self.pair {
+            pair::apply(code, n)?;
         }
         Ok(())
     }
@@ -212,6 +219,23 @@ enum Cmd {
     },
     /// Read-only report of firmware, boot entries, ESPs and NetBooty state.
     Doctor,
+    /// Pair with a NetBooty server using the code from its web page, then
+    /// announce this PC so it can be approved there.
+    Pair {
+        code: String,
+        /// Don't announce this PC to the server.
+        #[arg(long)]
+        no_announce: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Forget the paired server (NetBooty then only reports replies).
+    Unpair {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Announce this PC to the paired server again (shows it for approval).
+    Announce,
     /// Remove NetBooty, its boot entry, files and services (keeps signing keys).
     Uninstall {
         #[arg(long)]
@@ -291,6 +315,40 @@ fn main() -> Result<()> {
         }
         Cmd::Doctor => install::doctor()?,
         Cmd::Uninstall { esp, dry_run } => install::uninstall(esp, dry_run)?,
+        Cmd::Pair { code, no_announce, dry_run } => {
+            let mut s = saved_settings()?;
+            let p = pair::apply(&code, &mut s.network)?;
+            println!("server key fingerprint: {}", pair::fingerprints(&s.network));
+            println!("compare it with the fingerprint on the server's web page.");
+            let server =
+                p.server.map_or("broadcast only".into(), |ip| std::net::Ipv4Addr::from(ip).to_string());
+            println!("server: {server}, port {}", p.port);
+            install::install(&s, install::InstallOpts { image: None, dry_run, interactive })?;
+            if !no_announce && !dry_run {
+                match pair::announce(&s.network) {
+                    Ok(host) => {
+                        println!("\nannounced as {host}: approve it on the server's web page (New PCs).")
+                    }
+                    Err(e) => {
+                        println!("\ncould not announce ({e:#}); the PC will appear after its next boot.")
+                    }
+                }
+            }
+        }
+        Cmd::Unpair { dry_run } => {
+            let mut s = saved_settings()?;
+            pair::unpair(&mut s.network);
+            install::install(&s, install::InstallOpts { image: None, dry_run, interactive })?;
+            println!("unpaired: NetBooty now only reports server replies.");
+        }
+        Cmd::Announce => {
+            let s = saved_settings()?;
+            if s.network.keys.is_empty() {
+                bail!("not paired; run `netbooty-setup pair <code>` first");
+            }
+            let host = pair::announce(&s.network)?;
+            println!("announced as {host}");
+        }
         Cmd::Patch { cfg, input, output } => {
             let mut image = std::fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
             let current = pe::read_config(&image)?;

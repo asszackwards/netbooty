@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 
 use netbooty_cfg::config::{self, Config, Fallback, ResetKind};
 use netbooty_cfg::loadopt::{Resolution, resolve};
+use netbooty_cfg::proto;
 use uefi::boot::{self, LoadImageSource};
 use uefi::proto::BootPolicy;
 use uefi::proto::device_path::DevicePath;
@@ -166,7 +167,12 @@ fn decide(cfg: &Config, resolved: &[Option<Resolved>]) -> Choice {
         let mut tick = || {
             let q = query.as_mut()?;
             q.poll();
-            q.take_change().map(String::from)
+            let line = String::from(q.take_change()?);
+            let server = q.answer().map(|r| match r {
+                proto::Reply::Target(t) => t.clone(),
+                proto::Reply::NoPreference => String::from("no preference"),
+            });
+            Some(menu::NetUpdate { line, server })
         };
         menu::run(cfg.menu_mode, cfg.menu_timeout_s, &items, pending, Some(&auto_hint), &mut tick)
     };
@@ -194,12 +200,23 @@ fn decide(cfg: &Config, resolved: &[Option<Resolved>]) -> Choice {
         return Choice::Target(i);
     }
 
-    // Milestone 3: the server's reply is only reported, never acted on.
-    // Milestone 4 verifies its signature and boots the target it names.
+    // The paired server's verified answer.
     if let Some(q) = query.as_mut() {
         q.wait();
     }
+    let answer = query.as_ref().and_then(|q| q.answer().cloned());
     flush(&mut query);
+    match answer {
+        Some(proto::Reply::Target(name)) => match cfg.target_index(&name) {
+            Some(i) if available(i) => {
+                println!("NETBOOTY: decision=network target={name}");
+                return Choice::Target(i);
+            }
+            _ => println!("NETBOOTY: server chose {name}, which is not available here"),
+        },
+        Some(proto::Reply::NoPreference) => println!("NETBOOTY: server has no preference"),
+        None => {}
+    }
 
     match cfg.default {
         Some(i) if available(i) => {

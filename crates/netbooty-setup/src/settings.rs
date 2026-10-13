@@ -78,6 +78,10 @@ pub struct NetworkSettings {
     pub timeout_ms: u16,
     #[serde(default = "default_retries")]
     pub retries: u8,
+    /// The paired server's Ed25519 public keys (base64url), current first.
+    /// Empty = not paired: replies are only reported, never acted on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
 }
 
 impl Default for NetworkSettings {
@@ -88,6 +92,7 @@ impl Default for NetworkSettings {
             server: None,
             timeout_ms: default_net_timeout(),
             retries: default_retries(),
+            keys: Vec::new(),
         }
     }
 }
