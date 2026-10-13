@@ -1,17 +1,22 @@
 # NetBooty
 
-Choose which OS your multi-boot PCs start, from anywhere on your network.
+Choose which OS your multi-boot PCs start, see what they're running, and wake
+them straight into an OS, from anywhere on your network.
 
 NetBooty is a small UEFI boot selector. On every boot it asks a boot server on
 your LAN which OS to start. You set that from a web page or a JSON API, either
 until you change it or for the next boot only, so nobody needs to be at the PC.
-NetBooty then sets the firmware's `BootNext` and resets, and the firmware starts
+The same page shows which PCs are on and wakes those that are off. NetBooty
+then sets the firmware's `BootNext` and resets, and the firmware starts
 the chosen OS's **own** boot entry. Nothing is chainloaded, so each OS's
 measured boot stays as if it had been started directly (BitLocker keeps its
 PCR7 binding, for example).
 
-- **Remote OS choice:** the boot server (two small Docker containers) decides
+- **Remote OS choice:** the boot server (one small Docker container) decides
   what each paired PC boots, always or just once
+- **Power and wake:** the web page shows which PCs are on and what they are
+  probably running, and wakes a PC that is off straight into the OS you pick
+  (Wake-on-LAN)
 - **Signed answers:** NetBooty only acts on replies signed by its paired server
   for this PC and this boot. Anyone else on the LAN can at most make it fall
   back to its default
@@ -19,7 +24,9 @@ PCR7 binding, for example).
   the network step runs during the menu countdown
 - Local control too: a GRUB-style menu, and one-shot requests ("boot Windows
   next") from Linux and Windows
-- Works with any UEFI firmware and any set of OSes on one or more disks
+- Works with any UEFI firmware, and boots any OS that has a UEFI boot entry, on
+  one or more disks. Installing and configuring it needs one Linux install on
+  the PC
 - Secure Boot via the distro's signed shim and a dedicated MOK, your own keys
   (e.g. sbctl), or Secure Boot off
 - Keeps itself first in the boot order after OS updates
