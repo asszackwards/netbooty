@@ -141,7 +141,13 @@ fn decide(cfg: &Config, resolved: &[Option<Resolved>]) -> Choice {
         .map(|(i, t)| menu::Item { name: &t.name, hotkey: t.hotkey, available: available(i) })
         .collect();
     let pending = request.map(|i| cfg.targets[i].name.as_str());
-    if let menu::Outcome::Pick(i) = menu::run(cfg.menu_mode, cfg.menu_timeout_s, &items, pending) {
+    let auto_hint = match cfg.default {
+        Some(i) => alloc::format!("default {}", cfg.targets[i].name),
+        None => String::from("default: next firmware boot entry"),
+    };
+    if let menu::Outcome::Pick(i) =
+        menu::run(cfg.menu_mode, cfg.menu_timeout_s, &items, pending, Some(&auto_hint))
+    {
         println!("NETBOOTY: decision=menu target={}", cfg.targets[i].name);
         return Choice::Target(i);
     }

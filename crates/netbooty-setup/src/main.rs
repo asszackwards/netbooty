@@ -52,7 +52,8 @@ struct ConfigArgs {
     default: String,
     #[arg(long, value_enum, default_value = "on-key")]
     menu: MenuArg,
-    #[arg(long, default_value_t = 5)]
+    /// Seconds the menu counts down before continuing automatically (`--menu always`).
+    #[arg(long, default_value_t = 10)]
     menu_timeout: u16,
     #[arg(long, value_enum, default_value = "warm")]
     reset: ResetArg,

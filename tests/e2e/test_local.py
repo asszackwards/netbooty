@@ -54,22 +54,35 @@ def test_missing_loader_file_entry(scenario):
 
 def test_menu_on_key(scenario):
     r = scenario.prepare("--default", "beta").boot(
-        keys=[("starting Boot0100", "x"), ("choose what to boot", "a")])
+        keys=[("starting Boot0100", "x"), ("Use the", "a")])
     assert r.has("decision=menu target=alpha")
     assert r.target() == "alpha"
 
 
 def test_menu_always_times_out_to_automatic(scenario):
     r = scenario.prepare("--default", "beta", "--menu", "always", "--menu-timeout", "2").boot()
-    assert r.has("automatic in 2s")
+    assert r.has("Automatic boot in 2s")
     assert r.has("decision=default target=beta")
 
 
 def test_menu_always_keypress_picks(scenario):
     r = scenario.prepare("--default", "beta", "--menu", "always", "--menu-timeout", "10").boot(
-        keys=[("automatic in", "1")])
-    assert r.has("countdown stopped")
+        keys=[("Automatic boot in", "1")])
     assert r.has("decision=menu target=alpha")
+
+
+def test_menu_arrow_keys_and_enter(scenario):
+    # Down twice from "Automatic" (alpha, beta), up once (alpha), Enter.
+    down, up = "\x1b[B", "\x1b[A"
+    r = scenario.prepare("--default", "beta", "--menu", "always", "--menu-timeout", "10").boot(
+        keys=[("Automatic boot in", down), ("1) alpha", down), ("2) beta", up), ("1) alpha", "\r")])
+    assert r.has("decision=menu target=alpha")
+
+
+def test_menu_enter_on_automatic(scenario):
+    r = scenario.prepare("--default", "beta", "--menu", "always", "--menu-timeout", "10").boot(
+        keys=[("Automatic boot in", "\r")])
+    assert r.has("decision=default target=beta")
 
 
 def test_netbooty_next_is_consumed(scenario):
@@ -93,7 +106,7 @@ def test_native_boot_next_bypasses_netbooty(scenario):
 
 def test_menu_overrides_os_request(scenario):
     r = scenario.prepare("--default", "beta", "--menu", "always", script_extra="nbnext alpha\n").boot(
-        keys=[("automatic in", "2")])
+        keys=[("Automatic boot in", "2")])
     assert r.has("pending request from OS: alpha")
     assert r.has("decision=menu target=beta")
     assert r.has("NetBootyNext=false")

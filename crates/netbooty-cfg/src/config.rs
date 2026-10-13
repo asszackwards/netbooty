@@ -148,7 +148,7 @@ impl Default for Config {
             keys: Vec::new(),
             default: None,
             menu_mode: MenuMode::OnKey,
-            menu_timeout_s: 5,
+            menu_timeout_s: 10,
             reset: ResetKind::Warm,
             fallback: Fallback::Exit,
             reassert_bootorder: true,
