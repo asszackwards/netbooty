@@ -202,7 +202,7 @@ def test_web_and_api(app):
     b.post("/login", password=PASSWORD)
     _, body = b.get("/")
     assert f"id='power-{CID}'" in body and "probably running windows" in body
-    assert f"id='wake-{CID}' hidden" in body  # on: no wake form
+    assert f"/pc/{CID}/wake" in body  # shown even while on: waking an on PC is a no-op
 
     b.post(f"/pc/{CID}/mac", mac="aa-bb-cc-dd-ee-03")
     assert state(tmp)["clients"][CID]["mac"] == "aa:bb:cc:dd:ee:03"

@@ -108,7 +108,7 @@ def power_summary(p: dict, pc: dict) -> str:
     return "Power: checking…"
 
 
-# Refreshes the power lines and wake forms without reloading the page.
+# Refreshes the power lines without reloading the page.
 POWER_SCRIPT = """<script>
 setInterval(async () => {
   try {
@@ -117,8 +117,6 @@ setInterval(async () => {
     for (const pc of (await r.json()).pcs) {
       const line = document.getElementById('power-' + pc.id);
       if (line) line.textContent = pc.power.summary;
-      const wake = document.getElementById('wake-' + pc.id);
-      if (wake) wake.hidden = pc.power.state === 'on';
     }
   } catch (e) {}
 }, 10000);
@@ -138,7 +136,7 @@ input, select, button { font:inherit; padding:5px 8px; border:1px solid var(--li
   background:var(--bg); color:var(--fg) } button { cursor:pointer } button.primary { background:var(--accent);
   color:#fff; border-color:var(--accent) } code, .code { font-family:ui-monospace, monospace; font-size:13px;
   word-break:break-all } .err { color:#c0392b } form { display:inline } header { display:flex;
-  justify-content:space-between; align-items:center } [hidden] { display:none !important }
+  justify-content:space-between; align-items:center }
 """
 
 
@@ -200,7 +198,6 @@ def dashboard(cfg: Config, error: str = "", host: str | None = None) -> bytes:
         once = (f"<span>next boot: <b>{esc(pc['once'])}</b></span>"
                 f"<form method=post action='/pc/{pc['id']}/once'><button>cancel</button></form>") if pc["once"] else ""
         wake_opts = "".join(f"<option value='{esc(t)}'>{esc(t)}</option>" for t in pc["targets"])
-        hidden = "hidden" if pc["power"]["state"] == "on" else ""
         answer = pc["last_answer"] or "no preference"
         seen = (f"last asked {ago(pc['last_seen'])} from {esc(pc['from'])}, answered {esc(answer)}"
                 if pc["last_seen"] else "has not asked yet")
@@ -212,7 +209,7 @@ def dashboard(cfg: Config, error: str = "", host: str | None = None) -> bytes:
 <div class=row style='margin-top:6px'>{once_buttons} {once}</div>
 <div class=row style='margin-top:6px'><span id='power-{pc['id']}'>{esc(pc['power']['summary'])}</span></div>
 <div class=row style='margin-top:6px'>
-<form method=post action='/pc/{pc['id']}/wake' class=row id='wake-{pc['id']}' {hidden}>Wake into
+<form method=post action='/pc/{pc['id']}/wake' class=row>Wake into
 <select name=target><option value=''>its usual choice</option>{wake_opts}</select><button>Wake</button></form>
 <form method=post action='/pc/{pc['id']}/mac' class=row>MAC <input name=mac value='{esc(pc['mac'] or '')}'
 placeholder='learned when seen on' size=17><button>Save</button></form></div>
