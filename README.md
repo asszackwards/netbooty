@@ -1,5 +1,16 @@
 # NetBooty
 
+```
+        ((o))
+          |
+  .-"""-. | .-"""-.
+ /       \|/       \
+|         |         |
+|         |         |
+ \        |        /
+  '-.___.-'-.___.-'
+```
+
 Choose which OS your multi-boot PCs start, see what they're running, and wake
 them straight into an OS, from anywhere on your network.
 
