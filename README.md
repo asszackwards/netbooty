@@ -73,7 +73,10 @@ healthy (see [Maintenance](#maintenance)).
 
 ↑/↓ move, Enter boots the highlighted entry, numbers and the shown letters boot
 directly. *Automatic* (the first row, chosen when the countdown ends) boots a
-pending OS request, otherwise the default.
+pending OS request, otherwise the default. The first key press restarts the
+countdown at 20 s, and later keys do not restart it again, so a stuck key or a
+forgotten menu cannot hold up the boot. A menu opened by holding a key counts
+down 20 s from the start.
 
 ### Network
 

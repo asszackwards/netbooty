@@ -15,7 +15,9 @@ use uefi::{print, system};
 
 const TICK: Duration = Duration::from_millis(20);
 const HOLD_WINDOW_MS: u32 = 250;
-const IDLE_LIMIT_S: u32 = 60;
+/// Countdown after the first key, so a stuck key or an abandoned menu cannot
+/// stall the boot. Later keys do not restart it.
+const AFTER_KEY_S: u32 = 20;
 
 const FG: Color = Color::LightGray;
 const BG: Color = Color::Black;
@@ -297,9 +299,13 @@ pub fn run(
     }
     menu.draw_help(pending);
 
-    // `always` counts down until the first key; a key-triggered menu waits.
-    let mut countdown = (mode == MenuMode::Always).then_some(timeout_s as u32 * 1000);
-    let mut idle_ms = 0u32;
+    // `always` counts down from the configured timeout until the first key,
+    // then from AFTER_KEY_S. A key-triggered menu has had its first key.
+    let after_key_ms = AFTER_KEY_S * 1000;
+    let (mut left, mut keyed) = match mode {
+        MenuMode::Always => (timeout_s as u32 * 1000, false),
+        MenuMode::OnKey => (after_key_ms, true),
+    };
     let mut last_shown = u32::MAX;
     let outcome = loop {
         if let Some(net) = tick() {
@@ -311,9 +317,9 @@ pub fn run(
             }
         }
         if let Some(k) = read_key() {
-            idle_ms = 0;
-            if countdown.take().is_some() {
-                menu.status("");
+            if !keyed {
+                keyed = true;
+                left = after_key_ms;
             }
             let mut target = None;
             match k {
@@ -345,22 +351,15 @@ pub fn run(
                 }
             }
         }
-        if let Some(left) = countdown.as_mut() {
-            let secs = left.div_ceil(1000);
-            if secs != last_shown {
-                menu.status(&format!("Automatic boot in {secs}s"));
-                last_shown = secs;
-            }
-            if *left == 0 {
-                break Outcome::Auto;
-            }
-            *left = left.saturating_sub(TICK.as_millis() as u32);
-        } else {
-            idle_ms += TICK.as_millis() as u32;
-            if idle_ms >= IDLE_LIMIT_S * 1000 {
-                break Outcome::Auto;
-            }
+        let secs = left.div_ceil(1000);
+        if secs != last_shown {
+            menu.status(&format!("Automatic boot in {secs}s"));
+            last_shown = secs;
         }
+        if left == 0 {
+            break Outcome::Auto;
+        }
+        left = left.saturating_sub(TICK.as_millis() as u32);
         boot::stall(TICK);
     };
     menu.scr.close();

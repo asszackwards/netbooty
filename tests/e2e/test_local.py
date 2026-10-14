@@ -65,6 +65,15 @@ def test_menu_always_times_out_to_automatic(scenario):
     assert r.has("decision=default target=beta")
 
 
+def test_menu_key_restarts_countdown_once(scenario):
+    # The first key restarts the countdown at 20 s; later keys (a stuck key) do not.
+    down = "\x1b[B"
+    r = scenario.prepare("--default", "beta", "--menu", "always", "--menu-timeout", "2").boot(
+        timeout=90, keys=[("Automatic boot in", down), ("Automatic boot in 19s", down)])
+    assert r.output.count("Automatic boot in 20s") == 1
+    assert r.has("decision=default target=beta")
+
+
 def test_menu_always_keypress_picks(scenario):
     r = scenario.prepare("--default", "beta", "--menu", "always", "--menu-timeout", "10").boot(
         keys=[("Automatic boot in", "1")])
