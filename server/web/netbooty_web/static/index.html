@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NetBooty</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="bar">
+    <h1>NetBooty</h1>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#/" id="tab-pcs" class="tab">PCs</a>
+      <a href="#/pair" id="tab-pair" class="tab">Pair <span id="badge" class="badge" hidden></span></a>
+    </nav>
+    <form method="post" action="/logout"><button class="ghost">Log out</button></form>
+  </div>
+</header>
+<main>
+  <p id="offline" class="banner error" role="alert" hidden>Can't reach the NetBooty server. Retrying…</p>
+  <section id="view-pcs" aria-label="PCs"><p class="muted">Loading…</p></section>
+  <section id="view-pair" aria-label="Pair" hidden></section>
+  <noscript><p class="err">This page needs JavaScript.</p></noscript>
+</main>
+<div id="toasts" aria-live="polite"></div>
+</body>
+</html>

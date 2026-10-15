@@ -3,16 +3,15 @@
 import json
 import socket
 import sys
-import threading
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from netbooty_web.app import Config, make_server  # noqa: E402
+from netbooty_web.app import Config  # noqa: E402
 from netbooty_web.power import Monitor, arp_mac, magic_packet, os_hint  # noqa: E402
 from netbooty_web.store import StateError, Store, normalize_mac  # noqa: E402
-from test_app import CID, PASSWORD, TOKEN, Browser, api, state  # noqa: E402
+from test_app import CID, PASSWORD, TOKEN, Browser, api, serve, state  # noqa: E402
 
 MAC = "aa:bb:cc:dd:ee:01"
 
@@ -182,10 +181,9 @@ def app(setup):
     store, mon, clock, pinger, tmp = setup
     cfg = Config(str(tmp), PASSWORD, TOKEN, monitor=mon)
     mon.store = cfg.store
-    srv = make_server(cfg, "127.0.0.1", 0)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}", tmp, mon, pinger
-    srv.shutdown()
+    srv, base = serve(cfg)
+    yield base, tmp, mon, pinger
+    srv.close()
 
 
 def test_web_and_api(app):
@@ -200,18 +198,14 @@ def test_web_and_api(app):
 
     b = Browser(base)
     b.post("/login", password=PASSWORD)
-    _, body = b.get("/")
-    assert f"id='power-{CID}'" in body and "probably running windows" in body
-    assert f"/pc/{CID}/wake" in body  # shown even while on: waking an on PC is a no-op
-
-    b.post(f"/pc/{CID}/mac", mac="aa-bb-cc-dd-ee-03")
+    b.api("POST", f"/api/pcs/{CID}/mac", {"mac": "aa-bb-cc-dd-ee-03"})
     assert state(tmp)["clients"][CID]["mac"] == "aa:bb:cc:dd:ee:03"
-    status, body = b.post(f"/pc/{CID}/mac", mac="nope")
-    assert status == 400 and "invalid MAC" in body
+    status, err = b.api("POST", f"/api/pcs/{CID}/mac", {"mac": "nope"})
+    assert status == 400 and "invalid MAC" in err["error"]
 
     with udp_listener() as rx:
         mon.wol_addr = rx.getsockname()
-        b.post(f"/pc/{CID}/wake", target="")  # its usual choice: no one-shot
+        b.api("POST", f"/api/pcs/{CID}/wake", {"target": None})  # its usual choice: no one-shot
         assert rx.recv(200) == magic_packet("aa:bb:cc:dd:ee:03")
         assert state(tmp)["clients"][CID]["once"] is None
         assert api(base, "POST", "/api/pcs/pc/wake", {"target": "linux"})[0] == 200

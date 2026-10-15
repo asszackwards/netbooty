@@ -16,6 +16,8 @@ RUN apk add --no-cache su-exec \
  && adduser -D -H -u 10001 -G netbooty responder \
  && adduser -D -H -u 10002 -G netbooty web \
  && mkdir -p /data/key /data/state
+COPY server/web/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir --root-user-action=ignore -r /app/requirements.txt
 COPY --from=build /src/target/release/netbooty-server /usr/local/libexec/netbooty-server
 COPY server/netbooty-server.sh /usr/local/bin/netbooty-server
 COPY server/web/netbooty_web /app/netbooty_web

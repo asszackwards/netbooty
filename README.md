@@ -116,9 +116,9 @@ container (host networking) running two processes as separate users:
 
 - **responder** (Rust, UDP 47000): answers PCs at boot. The only user that can
   read the signing key.
-- **web** (Python standard library, port 8470): pairing, approving PCs, choosing
-  what they boot, power status and Wake-on-LAN, and a JSON API. It cannot read
-  the key.
+- **web** (Python, Flask served by waitress, port 8470): pairing, approving
+  PCs, choosing what they boot, power status and Wake-on-LAN, and a JSON API.
+  It cannot read the key.
 
 ```bash
 cd server
@@ -139,7 +139,7 @@ server itself:
 sudo netbooty-setup pair --discover      # or "Find a NetBooty server" in `sudo netbooty-setup`
 ```
 
-or copy the command from the web page's *Pair a PC*:
+or copy the command from the web page's **Pair** tab:
 
 ```bash
 sudo netbooty-setup pair 'netbooty-pair:1:…'
@@ -148,10 +148,15 @@ sudo netbooty-setup pair 'netbooty-pair:1:…'
 Either way it shows the server's key fingerprint: **check that it matches the
 web page** (that check is what stops another machine on the LAN from posing as
 your server). It then reinstalls NetBooty with the server's key and announces
-the PC. Approve it under *New PCs*, then choose what it boots:
+the PC. Approve it under *New PCs* on the **Pair** tab (the tab shows how many
+are waiting), then choose what it boots on the **PCs** tab. Changes save as you
+pick them:
 
 - **Boots**: the persistent choice, or *its own default*.
-- **…once**: boot a target on the next boot only, then go back to the choice.
+- **Next boot only**: boot a target on the next boot only, then go back to the
+  choice.
+- **Settings** (on each PC): rename it, change its targets, set its MAC
+  address, or remove it.
 
 Security: NetBooty only acts on replies signed by the paired key, for its own
 client ID and a fresh nonce from this boot. Anyone else on the LAN can at most
@@ -169,6 +174,7 @@ curl -H "Authorization: Bearer $TOKEN" -d '{"target":"windows"}' http://server:8
 curl -H "Authorization: Bearer $TOKEN" -d '{"target":null}'      http://server:8470/api/pcs/gamingpc/choice
 curl -H "Authorization: Bearer $TOKEN" -d '{"target":"linux"}'   http://server:8470/api/pcs/gamingpc/wake
 curl -H "Authorization: Bearer $TOKEN" -d '{"mac":"aa:bb:cc:dd:ee:ff"}' http://server:8470/api/pcs/gamingpc/mac
+curl -H "Authorization: Bearer $TOKEN" -d '{"name":"bigrig","targets":["windows","linux"]}' http://server:8470/api/pcs/gamingpc
 ```
 
 ### Power and wake
@@ -182,7 +188,7 @@ seen), plus a hint from the ping's TTL (Windows replies with 128, Linux with 64)
 When a PC is off, *Wake into* sets a one-time choice (or keeps its usual one)
 and sends a Wake-on-LAN packet. NetBooty then asks the server and boots that OS.
 The server learns the PC's MAC address the first time it sees it on; you can
-also enter it on the PC's card.
+also enter it under the PC's *Settings*.
 
 - Enable Wake-on-LAN in the BIOS (on many boards: *ErP* off, *Wake on LAN*
   on), and in the OS's network card settings if it should also wake from sleep.

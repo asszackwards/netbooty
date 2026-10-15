@@ -171,21 +171,44 @@ class Store:
                 c.pop("mac", None)
         self.update(fn)
 
-    def approve(self, cid: str, name: str, targets: list[str]) -> None:
-        if not re.fullmatch(r"[0-9a-f]{32}", cid):
-            raise StateError("bad client id")
+    @staticmethod
+    def _check_pc(s: dict, cid: str, name: str, targets: list[str]) -> None:
         if not name or len(name) > 63:
             raise StateError("give the PC a name")
         bad = [t for t in targets if not valid_name(t)]
         if bad:
             raise StateError(f"invalid target names: {', '.join(bad)}")
+        if any(c.get("name", "").lower() == name.lower() for k, c in s["clients"].items() if k != cid):
+            raise StateError(f"a PC named {name!r} already exists")
+
+    def approve(self, cid: str, name: str, targets: list[str]) -> None:
+        if not re.fullmatch(r"[0-9a-f]{32}", cid):
+            raise StateError("bad client id")
 
         def fn(s):
-            if any(c.get("name", "").lower() == name.lower() for k, c in s["clients"].items() if k != cid):
-                raise StateError(f"a PC named {name!r} already exists")
+            self._check_pc(s, cid, name, targets)
             s["clients"][cid] = {"name": name, "targets": targets, "choice": None, "once": None}
             if cid in s["dismissed"]:
                 s["dismissed"].remove(cid)
+        self.update(fn)
+
+    def edit(self, cid: str, name: str | None = None, targets: list[str] | None = None) -> None:
+        """Rename a PC and/or replace its targets. A choice or pending one-shot
+        for a target that is no longer offered is cleared."""
+        def fn(s):
+            c = s["clients"].get(cid)
+            if c is None:
+                raise StateError("no such PC")
+            new_name = c.get("name", "") if name is None else name
+            new_targets = c.get("targets", []) if targets is None else targets
+            self._check_pc(s, cid, new_name, new_targets)
+            c["name"], c["targets"] = new_name, new_targets
+            if new_targets:  # no targets: any target is allowed
+                keep = {t.lower() for t in new_targets}
+                if c.get("choice") and c["choice"].lower() not in keep:
+                    c["choice"] = None
+                if c.get("once") and c["once"]["target"].lower() not in keep:
+                    c["once"] = None
         self.update(fn)
 
     def dismiss(self, cid: str) -> None:

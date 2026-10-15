@@ -4,6 +4,7 @@ import http.cookiejar
 import json
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,11 +35,17 @@ def app(tmp_path):
     (state / "requests.json").write_text(json.dumps({"version": 1, "requests": {
         CID: {"first_seen": 9e9, "last_seen": 9e9, "from": "10.0.0.9", "hostname": "zaqbox",
               "targets": ["windows", "linux"]}}}))
-    srv = make_server(Config(str(tmp_path), PASSWORD, TOKEN), "127.0.0.1", 0)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv, base = serve(Config(str(tmp_path), PASSWORD, TOKEN))
     OPENED.clear()
-    yield f"http://127.0.0.1:{srv.server_address[1]}", tmp_path
-    srv.shutdown()
+    yield base, tmp_path
+    srv.close()
+
+
+def serve(cfg):
+    """Start the real (waitress) server on a free port."""
+    srv = make_server(cfg, "127.0.0.1", 0)
+    threading.Thread(target=srv.run, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.effective_port}"
 
 
 class Browser:
@@ -49,6 +56,20 @@ class Browser:
     def get(self, path):
         with self.opener.open(self.base + path) as r:
             return r.status, r.read().decode()
+
+    def response(self, path):
+        with self.opener.open(self.base + path) as r:
+            return r.status, r.headers, r.read().decode()
+
+    def api(self, method, path, body=None, headers=None):
+        """The JSON API with this browser's login session (no bearer token)."""
+        req = urllib.request.Request(self.base + path, method=method, headers=headers or {},
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with self.opener.open(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
 
     def post(self, path, **fields):
         data = urllib.parse.urlencode(fields).encode()
@@ -83,33 +104,93 @@ def test_login_required_and_wrong_password(app):
     assert status == 401 and "Wrong password" in body
 
 
+def login(base):
+    b = Browser(base)
+    status, body = b.post("/login", password=PASSWORD)
+    assert status == 200 and "/static/app.js" in body  # landed on the page
+    return b
+
+
+def test_page_and_static_files(app):
+    base, _ = app
+    b = Browser(base)
+    status, body = b.get("/")
+    assert "Password" in body and "app.js" not in body  # login page, not the app
+    assert b.api("GET", "/api/state")[0] == 401
+    status, _ = b.get("/static/app.js")  # no data in it: served without login
+    assert status == 200
+
+    b = login(base)
+    status, headers, body = b.response("/")
+    assert status == 200 and "<title>NetBooty</title>" in body
+    assert "default-src 'self'" in headers["Content-Security-Policy"]
+    assert headers["X-Frame-Options"] == "DENY" and headers["Cache-Control"] == "no-store"
+    status, headers, _ = b.response("/static/app.js")
+    assert "javascript" in headers["Content-Type"]
+    with pytest.raises(urllib.error.HTTPError) as e:
+        b.get("/static/../store.py")
+    assert e.value.code == 404
+
+    b.post("/logout")
+    assert b.api("GET", "/api/state")[0] == 401
+
+
 def test_pair_approve_choose_once(app):
     base, tmp = app
-    b = Browser(base)
-    _, body = b.post("/login", password=PASSWORD)
-    assert "netbooty-pair:1:47000:KEY:10.0.0.5" in body
-    assert "aaaa-bbbb-cccc-dddd" in body
-    assert "zaqbox" in body  # pending request with announced hostname
+    b = login(base)
+    _, st = b.api("GET", "/api/state")
+    assert st["pairing"] == {"code": "netbooty-pair:1:47000:KEY:10.0.0.5", "fingerprints": ["aaaa-bbbb-cccc-dddd"]}
+    assert st["requests"][0]["hostname"] == "zaqbox"  # pending request with announced hostname
+    assert abs(st["now"] - time.time()) < 60
 
-    b.post(f"/request/{CID}/approve", name="zaqbox", targets="windows,linux")
+    assert b.api("POST", f"/api/requests/{CID}/approve", {"name": "zaqbox", "targets": ["windows", "linux"]})[0] == 200
     s = state(tmp)
     assert s["clients"][CID] == {"name": "zaqbox", "targets": ["windows", "linux"], "choice": None, "once": None}
 
-    b.post(f"/pc/{CID}/choice", target="windows")
+    b.api("POST", f"/api/pcs/{CID}/choice", {"target": "windows"})
     assert state(tmp)["clients"][CID]["choice"] == "windows"
-    status, body = b.post(f"/pc/{CID}/choice", target="macos")
-    assert status == 400 and "no target" in body
+    status, err = b.api("POST", f"/api/pcs/{CID}/choice", {"target": "macos"})
+    assert status == 400 and "no target" in err["error"]
 
-    b.post(f"/pc/{CID}/once", target="linux")
+    b.api("POST", f"/api/pcs/{CID}/once", {"target": "linux"})
     once = state(tmp)["clients"][CID]["once"]
     assert once["target"] == "linux" and len(once["id"]) == 16
-    _, body = b.get("/")
-    assert "next boot: <b>linux</b>" in body
-    b.post(f"/pc/{CID}/once")  # cancel
+    assert b.api("GET", "/api/state")[1]["pcs"][0]["once"] == "linux"
+    b.api("POST", f"/api/pcs/{CID}/once", {"target": None})  # cancel
     assert state(tmp)["clients"][CID]["once"] is None
 
     _, txt = b.get("/pairing.txt")
     assert txt.strip() == "netbooty-pair:1:47000:KEY:10.0.0.5"
+
+
+def test_edit_pc(app):
+    base, tmp = app
+    api(base, "POST", f"/api/requests/{CID}/approve", {"name": "zaqbox", "targets": ["windows", "linux"]})
+    api(base, "POST", "/api/pcs/zaqbox/choice", {"target": "linux"})
+    api(base, "POST", "/api/pcs/zaqbox/once", {"target": "windows"})
+
+    assert api(base, "POST", "/api/pcs/zaqbox", {"name": " gamingpc "})[0] == 200
+    c = state(tmp)["clients"][CID]
+    assert c["name"] == "gamingpc" and c["targets"] == ["windows", "linux"] and c["choice"] == "linux"
+
+    # Dropping a target clears the choice / one-shot that used it.
+    assert api(base, "POST", "/api/pcs/gamingpc", {"targets": ["windows", "fedora"]})[0] == 200
+    c = state(tmp)["clients"][CID]
+    assert c["targets"] == ["windows", "fedora"] and c["choice"] is None and c["once"]["target"] == "windows"
+    api(base, "POST", "/api/pcs/gamingpc", {"targets": ["fedora"]})
+    assert state(tmp)["clients"][CID]["once"] is None
+
+    status, err = api(base, "POST", "/api/pcs/gamingpc", {"targets": ["bad name"]})
+    assert status == 400 and "invalid target" in err["error"]
+    assert api(base, "POST", "/api/pcs/gamingpc", {"targets": "fedora"})[0] == 400  # not a list
+    assert api(base, "POST", "/api/pcs/gamingpc", {"name": ""})[0] == 400
+    assert api(base, "POST", "/api/pcs/nosuch", {"name": "x"})[0] == 400
+
+    s = json.loads((tmp / "state" / "state.json").read_text())
+    s["clients"]["cd" * 16] = {"name": "other", "targets": [], "choice": None, "once": None}
+    (tmp / "state" / "state.json").write_text(json.dumps(s))
+    status, err = api(base, "POST", "/api/pcs/gamingpc", {"name": "OTHER"})
+    assert status == 400 and "already exists" in err["error"]
 
 
 def test_once_shown_as_used_after_responder_serves_it(app):
@@ -145,31 +226,42 @@ def test_api(app):
 
 def test_dismiss_hides_request(app):
     base, tmp = app
-    b = Browser(base)
-    b.post("/login", password=PASSWORD)
-    b.post(f"/request/{CID}/dismiss")
+    b = login(base)
+    assert b.api("POST", f"/api/requests/{CID}/dismiss")[0] == 200
     assert CID in state(tmp)["dismissed"]
-    _, body = b.get("/")
-    assert "zaqbox" not in body
+    assert b.api("GET", "/api/state")[1]["requests"] == []
 
 
 def test_cross_site_post_refused(app):
     base, tmp = app
-    b = Browser(base)
-    b.post("/login", password=PASSWORD)
-    req = urllib.request.Request(f"{base}/request/{CID}/dismiss", data=b"", headers={"Origin": "http://evil.example"})
+    b = login(base)
+    evil = {"Origin": "http://evil.example", "Content-Type": "application/json"}
+    status, err = b.api("POST", f"/api/requests/{CID}/dismiss", {}, headers=evil)
+    assert status == 403 and "cross-site" in err["error"]
+    assert b.api("DELETE", "/api/pcs/x", headers=evil)[0] == 403
+    assert not (tmp / "state" / "state.json").exists()
+    status, _ = b.post("/logout")  # not refused without an Origin
+    req = urllib.request.Request(f"{base}/login", data=b"password=" + PASSWORD.encode(), headers=evil)
     with pytest.raises(urllib.error.HTTPError) as e:
         b.opener.open(req)
     assert e.value.code == 403
-    assert not (tmp / "state" / "state.json").exists()
+
+    # Same origin is fine; so is a bearer token (not a browser) from anywhere.
+    b = login(base)
+    same = {"Origin": base}
+    assert b.api("POST", f"/api/requests/{CID}/dismiss", {}, headers=same)[0] == 200
+    req = urllib.request.Request(f"{base}/api/requests/{CID}/dismiss", data=b"{}", method="POST",
+                                 headers={**evil, "Authorization": f"Bearer {TOKEN}"})
+    with urllib.request.urlopen(req) as r:
+        assert r.status == 200
 
 
 def test_never_touches_the_key(app):
     base, tmp = app
-    b = Browser(base)
-    b.post("/login", password=PASSWORD)
+    b = login(base)
     b.get("/")
-    b.post(f"/request/{CID}/approve", name="pc", targets="windows")
+    b.get("/static/app.js")
+    b.api("POST", f"/api/requests/{CID}/approve", {"name": "pc", "targets": ["windows"]})
     api(base, "GET", "/api/state")
     key_dir = str(tmp / "key")
     assert not [p for p in OPENED if p.startswith(key_dir)]
