@@ -22,6 +22,7 @@ docker buildx build \
     -f server/Dockerfile \
     --platform "$platforms" \
     --label org.opencontainers.image.source=https://github.com/asszackwards/netbooty \
+    --annotation index:org.opencontainers.image.source=https://github.com/asszackwards/netbooty \
     --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
     "${tags[@]}" \
     --push \
